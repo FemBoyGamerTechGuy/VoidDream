@@ -103,6 +103,22 @@ Themes live in `~/.local/share/VoidDream/themes/` as JSON files and are loaded a
 
 ---
 
+## Project Structure
+
+```
+VoidDream/
+├── src/                  # Rust source code
+├── themes/               # Built-in theme JSON files
+├── icons/                # Icon set JSON files
+├── CHANGELOG.md          # Version history
+├── CONTRIBUTING.md       # Contributor License Agreement
+├── Cargo.toml            # Rust package manifest
+├── LICENSE               # GPL-3.0-or-later
+└── README.md
+```
+
+---
+
 ## Part of Faded Dream
 
 VoidDream is part of the [Faded Dream dotfiles](https://github.com/FemBoyGamerTechGuy/Faded-Dream-dotfiles) ecosystem.
