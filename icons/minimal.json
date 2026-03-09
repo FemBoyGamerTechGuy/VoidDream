@@ -1,0 +1,15 @@
+{
+  "dir": "▸",
+  "symlink": "↪",
+  "image": "i",
+  "video": "v",
+  "audio": "a",
+  "archive": "z",
+  "doc": "d",
+  "code": "c",
+  "exec": "x",
+  "other": "f",
+  "by_name": {},
+  "by_ext": {},
+  "named_dirs": {}
+}

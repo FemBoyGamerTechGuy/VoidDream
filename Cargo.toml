@@ -1,0 +1,50 @@
+[package]
+name = "VoidDream"
+version = "0.1.0"
+edition = "2021"
+description = "A dreamy void-themed TUI file manager built with Rust and Ratatui"
+authors = ["FemBoyGamerTechGuy"]
+repository = "https://github.com/FemBoyGamerTechGuy/VoidDream"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "VoidDream"
+path = "src/main.rs"
+
+[dependencies]
+# Use ratatui 0.30 + crossterm 0.29 on your machine (requires Rust >= 1.85)
+ratatui       = "0.30"
+crossterm     = { version = "0.29", features = ["event-stream"] }
+ratatui-image = { version = "10", features = ["crossterm"] }
+image         = { version = "0.25", default-features = false, features = ["png","jpeg","gif","bmp","webp","ico","tiff"] }
+anyhow        = "1"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+
+[profile.release]
+opt-level     = 3
+strip         = true
+lto           = true
+codegen-units = 1
+
+# ── .deb package (cargo-deb) ──────────────────────────────────────────────────
+[package.metadata.deb]
+maintainer = "FemBoyGamerTechGuy"
+copyright = "2026, FemBoyGamerTechGuy"
+extended-description = "A dreamy void-themed TUI file manager built with Ratatui"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/VoidDream", "usr/bin/", "755"],
+    ["themes/*.json",            "usr/share/VoidDream/themes/", "644"],
+    ["icons/*.json",             "usr/share/VoidDream/icons/",  "644"],
+]
+
+# ── .rpm package (cargo-generate-rpm) ─────────────────────────────────────────
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/VoidDream",  dest = "/usr/bin/VoidDream",              mode = "755" },
+    { source = "themes/*.json",             dest = "/usr/share/VoidDream/themes/",    mode = "644" },
+    { source = "icons/*.json",              dest = "/usr/share/VoidDream/icons/",     mode = "644" },
+]
