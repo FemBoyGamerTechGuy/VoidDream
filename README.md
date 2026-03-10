@@ -19,6 +19,18 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 
 ---
 
+## Previews
+
+<div align="center">
+
+<img src="Previews/2026-03-10-145022_hyprshot.png" width="49%"/> <img src="Previews/2026-03-10-145035_hyprshot.png" width="49%"/>
+<img src="Previews/2026-03-10-145054_hyprshot.png" width="49%"/> <img src="Previews/2026-03-10-145154_hyprshot.png" width="49%"/>
+<img src="Previews/2026-03-10-145208_hyprshot.png" width="99%"/>
+
+</div>
+
+---
+
 ## Features
 
 | | Feature |
@@ -158,6 +170,7 @@ VoidDream/
 ├── src/                  # Rust source code
 ├── themes/               # Built-in theme JSON files
 ├── icons/                # Icon set JSON files
+├── Previews/             # Screenshots
 ├── CHANGELOG.md          # Version history
 ├── CONTRIBUTING.md       # Contributor License Agreement
 ├── THEMING.md            # Theme & icon set API for users
