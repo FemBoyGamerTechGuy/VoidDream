@@ -22,12 +22,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    io::{self, Read, Write},
-    mem,
+    io,
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}},
+    sync::mpsc,
     time::{Duration, Instant},
+    env,
 };
 
 // ─── User-defined themes ──────────────────────────────────────────────────────
@@ -60,12 +60,8 @@ use std::{
 /// To ADD a theme  → drop a new .json file into the themes directory.
 /// To REMOVE a theme → delete its .json file.
 /// To RENAME a theme → rename the file.
-/// All fields except the 13 base palette keys are optional.
-/// Missing fields fall back to a computed value derived from the base palette
-/// so old 13-key themes continue to work with no changes.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct UserThemeColors {
-    // ── Base palette (required) ───────────────────────────────────────────
+pub struct UserThemeColors {
     pub base:     String,
     pub surface0: String,
     pub surface1: String,
@@ -79,76 +75,18 @@ struct UserThemeColors {
     pub red:      String,
     pub yellow:   String,
     pub pink:     String,
-
-    // ── Tab bar ───────────────────────────────────────────────────────────
-    #[serde(default)] pub tab_active_fg:      Option<String>,
-    #[serde(default)] pub tab_active_bg:      Option<String>,
-    #[serde(default)] pub tab_inactive_fg:    Option<String>,
-    #[serde(default)] pub tab_inactive_bg:    Option<String>,
-
-    // ── File list ─────────────────────────────────────────────────────────
-    #[serde(default)] pub cursor_fg:          Option<String>,
-    #[serde(default)] pub cursor_bg:          Option<String>,
-    #[serde(default)] pub selected_fg:        Option<String>,
-    #[serde(default)] pub selected_bg:        Option<String>,
-    #[serde(default)] pub border_fg:          Option<String>,
-    #[serde(default)] pub panel_bg:           Option<String>,
-    #[serde(default)] pub title_fg:           Option<String>,
-
-    // ── File kind colors ──────────────────────────────────────────────────
-    #[serde(default)] pub color_dir:          Option<String>,
-    #[serde(default)] pub color_symlink:      Option<String>,
-    #[serde(default)] pub color_image:        Option<String>,
-    #[serde(default)] pub color_video:        Option<String>,
-    #[serde(default)] pub color_audio:        Option<String>,
-    #[serde(default)] pub color_archive:      Option<String>,
-    #[serde(default)] pub color_doc:          Option<String>,
-    #[serde(default)] pub color_code:         Option<String>,
-    #[serde(default)] pub color_exec:         Option<String>,
-    #[serde(default)] pub color_other:        Option<String>,
-
-    // ── Status bar ────────────────────────────────────────────────────────
-    #[serde(default)] pub status_path_fg:     Option<String>,
-    #[serde(default)] pub status_path_bg:     Option<String>,
-    #[serde(default)] pub status_msg_fg:      Option<String>,
-    #[serde(default)] pub status_msg_bg:      Option<String>,
-    #[serde(default)] pub status_err_fg:      Option<String>,
-    #[serde(default)] pub status_err_bg:      Option<String>,
-    #[serde(default)] pub status_yank_fg:     Option<String>,
-    #[serde(default)] pub status_yank_bg:     Option<String>,
-    #[serde(default)] pub status_sel_fg:      Option<String>,
-    #[serde(default)] pub status_sel_bg:      Option<String>,
-    #[serde(default)] pub status_hint_fg:     Option<String>,
-    #[serde(default)] pub status_bar_fg:      Option<String>,
-    #[serde(default)] pub status_bar_bg:      Option<String>,
-
-    // ── Overlays ──────────────────────────────────────────────────────────
-    #[serde(default)] pub popup_border_fg:    Option<String>,
-    #[serde(default)] pub popup_bg:           Option<String>,
-    #[serde(default)] pub popup_text_fg:      Option<String>,
-    #[serde(default)] pub popup_dim_fg:       Option<String>,
-
-    // ── Progress bar ──────────────────────────────────────────────────────
-    #[serde(default)] pub progress_filled_fg: Option<String>,
-    #[serde(default)] pub progress_empty_fg:  Option<String>,
-
-    // ── Settings UI ───────────────────────────────────────────────────────
-    #[serde(default)] pub settings_key_fg:    Option<String>,
-    #[serde(default)] pub settings_val_fg:    Option<String>,
-    #[serde(default)] pub settings_cursor_fg: Option<String>,
-    #[serde(default)] pub settings_cursor_bg: Option<String>,
 }
 
 /// A resolved user theme: name (from filename) + parsed colors.
 #[derive(Clone, Debug)]
-struct UserThemeEntry {
-    name:   String,
-    colors: UserThemeColors,
+pub struct UserThemeEntry {
+    pub name:   String,
+    pub colors: UserThemeColors,
 }
 
 impl UserThemeEntry {
     /// Returns ~/.local/share/fd-files/themes/
-    fn themes_dir() -> PathBuf {
+    pub fn themes_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
         PathBuf::from(home).join(".local").join("share").join("fd-files").join("themes")
     }
@@ -156,7 +94,7 @@ impl UserThemeEntry {
     /// Scan the themes directory and load every *.json file.
     /// The theme name is the filename stem (e.g. "Fire Aura.json" → "Fire Aura").
     /// Files that fail to parse are silently skipped.
-    fn load_all() -> Vec<Self> {
+    pub fn load_all() -> Vec<Self> {
         let dir = Self::themes_dir();
         if !dir.exists() { return vec![]; }
         let mut themes = Vec::new();
@@ -197,342 +135,282 @@ impl UserThemeEntry {
         Color::Reset
     }
 
-    /// Convert to a runtime Theme, applying optional overrides and deriving
-    /// sensible defaults for any missing fields from the base palette.
-    fn to_theme(&self) -> Theme {
+    /// Convert to a runtime Theme.
+    pub fn to_theme(&self) -> Theme {
         let c = &self.colors;
-        let p = |s: &str| UserThemeEntry::parse_hex(s);
-        let o = |opt: &Option<String>, fallback: &str| -> Color {
-            opt.as_deref().map(UserThemeEntry::parse_hex).unwrap_or_else(|| p(fallback))
-        };
-
-        // Resolved base palette — only the ones actually used directly in Theme fields
-        let base     = p(&c.base);
-        let surface0 = p(&c.surface0);
-        let text     = p(&c.text);
-
         Theme {
-            base, surface0,
-            text,
-
-            // Tab bar
-            tab_active_fg:   o(&c.tab_active_fg,   &c.base),
-            tab_active_bg:   o(&c.tab_active_bg,   &c.mauve),
-            tab_inactive_fg: o(&c.tab_inactive_fg, &c.subtext),
-            tab_inactive_bg: o(&c.tab_inactive_bg, &c.surface0),
-
-            // File list cursor/selection
-            cursor_fg:  o(&c.cursor_fg,   &c.base),
-            cursor_bg:  o(&c.cursor_bg,   &c.mauve),
-            selected_fg: o(&c.selected_fg, &c.mauve),
-            selected_bg: o(&c.selected_bg, &c.surface0),
-            border_fg:  o(&c.border_fg,   &c.surface1),
-            panel_bg:   o(&c.panel_bg,    &c.base),
-            title_fg:   o(&c.title_fg,    &c.blue),
-
-            // File kind colors
-            color_dir:     o(&c.color_dir,     &c.blue),
-            color_symlink: o(&c.color_symlink,  &c.pink),
-            color_image:   o(&c.color_image,    &c.mauve),
-            color_video:   o(&c.color_video,    &c.mauve),
-            color_audio:   o(&c.color_audio,    &c.pink),
-            color_archive: o(&c.color_archive,  &c.yellow),
-            color_doc:     o(&c.color_doc,      &c.teal),
-            color_code:    o(&c.color_code,     &c.green),
-            color_exec:    o(&c.color_exec,     &c.red),
-            color_other:   o(&c.color_other,    &c.text),
-
-            // Status bar
-            status_path_fg: o(&c.status_path_fg, &c.base),
-            status_path_bg: o(&c.status_path_bg, &c.blue),
-            status_msg_fg:  o(&c.status_msg_fg,  &c.base),
-            status_msg_bg:  o(&c.status_msg_bg,  &c.teal),
-            status_err_fg:  o(&c.status_err_fg,  &c.base),
-            status_err_bg:  o(&c.status_err_bg,  &c.red),
-            status_yank_fg: o(&c.status_yank_fg, &c.base),
-            status_yank_bg: o(&c.status_yank_bg, &c.yellow),
-            status_sel_fg:  o(&c.status_sel_fg,  &c.base),
-            status_sel_bg:  o(&c.status_sel_bg,  &c.mauve),
-            status_hint_fg: o(&c.status_hint_fg, &c.mauve),
-            status_bar_fg:  o(&c.status_bar_fg,  &c.subtext),
-            status_bar_bg:  o(&c.status_bar_bg,  &c.surface0),
-
-            // Overlays
-            popup_border_fg: o(&c.popup_border_fg, &c.mauve),
-            popup_bg:        o(&c.popup_bg,        &c.base),
-            popup_text_fg:   o(&c.popup_text_fg,   &c.text),
-            popup_dim_fg:    o(&c.popup_dim_fg,    &c.overlay0),
-
-            // Progress bar
-            progress_filled_fg: o(&c.progress_filled_fg, &c.mauve),
-            progress_empty_fg:  o(&c.progress_empty_fg,  &c.surface1),
-
-            // Settings UI
-            settings_key_fg:    o(&c.settings_key_fg,    &c.blue),
-            settings_val_fg:    o(&c.settings_val_fg,    &c.text),
-            settings_cursor_fg: o(&c.settings_cursor_fg, &c.base),
-            settings_cursor_bg: o(&c.settings_cursor_bg, &c.mauve),
-
-            // Warn (unsaved changes etc)
-            warn_fg: o(&c.status_err_fg,  &c.base),
-            warn_bg: o(&c.status_yank_bg, &c.yellow),
-        }
-    }
-}
-
-// ─── User-defined icon sets ───────────────────────────────────────────────────
-/// One icon set, loaded from a single JSON file in
-///   ~/.local/share/fd-files/icons/
-///
-/// The filename stem becomes the icon set name:
-///   "nerdfont.json"   →  "nerdfont"
-///   "My Icons.json"   →  "My Icons"
-///
-/// File format — all values are single icon strings (unicode / emoji / text):
-/// {
-///   "dir":        "",     ← default folder
-///   "symlink":    "",
-///   "image":      "",
-///   "video":      "",
-///   "audio":      "",
-///   "archive":    "",
-///   "doc":        "",
-///   "code":       "",
-///   "exec":       "",
-///   "other":      "",
-///
-///   "by_ext": {           ← per-extension overrides (optional)
-///     "rs": "",
-///     "py": "",
-///     ...
-///   },
-///   "by_name": {          ← per-filename overrides (optional)
-///     "Dockerfile": "",
-///     "Makefile":   "",
-///     ...
-///   },
-///   "named_dirs": {       ← per-directory-name overrides (optional)
-///     "downloads": "",
-///     ".git":      "",
-///     ...
-///   }
-/// }
-///
-/// To ADD an icon set  → drop a new .json file in the icons directory.
-/// To REMOVE           → delete the file.
-/// To RENAME           → rename the file.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct UserIconColors {
-    // File kind defaults
-    dir:     String,
-    symlink: String,
-    image:   String,
-    video:   String,
-    audio:   String,
-    archive: String,
-    doc:     String,
-    code:    String,
-    exec:    String,
-    other:   String,
-    // Optional lookup tables
-    #[serde(default)] by_ext:    std::collections::HashMap<String, String>,
-    #[serde(default)] by_name:   std::collections::HashMap<String, String>,
-    #[serde(default)] named_dirs: std::collections::HashMap<String, String>,
-}
-
-#[derive(Clone, Debug)]
-struct UserIconEntry {
-    name:   String,
-    icons:  UserIconColors,
-}
-
-impl UserIconEntry {
-    fn icons_dir() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        PathBuf::from(home).join(".local").join("share").join("fd-files").join("icons")
-    }
-
-    fn load_all() -> Vec<Self> {
-        let dir = Self::icons_dir();
-        if !dir.exists() { return vec![]; }
-        let mut sets = Vec::new();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            let mut paths: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-                .collect();
-            paths.sort();
-            for path in paths {
-                let name = path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("").to_string();
-                if name.is_empty() { continue; }
-                if let Ok(text) = fs::read_to_string(&path) {
-                    if let Ok(icons) = serde_json::from_str::<UserIconColors>(&text) {
-                        sets.push(UserIconEntry { name, icons });
-                    }
-                }
-            }
-        }
-        sets
-    }
-
-    /// Look up the icon string for a given path + kind.
-    fn get_icon(&self, path: &Path, kind: &FileKind) -> String {
-        let ic = &self.icons;
-        // 1. by_name exact match
-        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
-        if let Some(i) = ic.by_name.get(&fname) { return i.clone(); }
-
-        // 2. named_dirs (for directories and symlinks-to-dirs)
-        if *kind == FileKind::Dir || (*kind == FileKind::Symlink && path.is_dir()) {
-            if let Some(i) = ic.named_dirs.get(&fname) { return i.clone(); }
-            if *kind == FileKind::Dir { return ic.dir.clone(); }
-        }
-        if *kind == FileKind::Symlink { return ic.symlink.clone(); }
-
-        // 3. by_ext
-        let ext = path.extension().and_then(|e| e.to_str())
-            .map(|s| s.to_lowercase()).unwrap_or_default();
-        if !ext.is_empty() {
-            if let Some(i) = ic.by_ext.get(&ext) { return i.clone(); }
-        }
-
-        // 4. fall back to kind default
-        match kind {
-            FileKind::Image   => ic.image.clone(),
-            FileKind::Video   => ic.video.clone(),
-            FileKind::Audio   => ic.audio.clone(),
-            FileKind::Archive => ic.archive.clone(),
-            FileKind::Doc     => ic.doc.clone(),
-            FileKind::Code    => ic.code.clone(),
-            FileKind::Exec    => ic.exec.clone(),
-            FileKind::Other   => ic.other.clone(),
-            FileKind::Dir     => ic.dir.clone(),
-            FileKind::Symlink => ic.symlink.clone(),
+            base:     Self::parse_hex(&c.base),
+            surface0: Self::parse_hex(&c.surface0),
+            surface1: Self::parse_hex(&c.surface1),
+            overlay0: Self::parse_hex(&c.overlay0),
+            text:     Self::parse_hex(&c.text),
+            subtext:  Self::parse_hex(&c.subtext),
+            mauve:    Self::parse_hex(&c.mauve),
+            blue:     Self::parse_hex(&c.blue),
+            teal:     Self::parse_hex(&c.teal),
+            green:    Self::parse_hex(&c.green),
+            red:      Self::parse_hex(&c.red),
+            yellow:   Self::parse_hex(&c.yellow),
+            pink:     Self::parse_hex(&c.pink),
         }
     }
 }
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 #[derive(Clone)]
-struct Theme {
-    // Base — only the ones still used directly in draw code
-    base: Color, surface0: Color, text: Color,
-    // Tab bar
-    tab_active_fg:      Color, tab_active_bg:      Color,
-    tab_inactive_fg:    Color, tab_inactive_bg:    Color,
-    // File list
-    cursor_fg:          Color, cursor_bg:          Color,
-    selected_fg:        Color, selected_bg:        Color,
-    border_fg:          Color, panel_bg:           Color,
-    title_fg:           Color,
-    // File kind colors
-    color_dir:     Color, color_symlink: Color,
-    color_image:   Color, color_video:   Color,
-    color_audio:   Color, color_archive: Color,
-    color_doc:     Color, color_code:    Color,
-    color_exec:    Color, color_other:   Color,
-    // Status bar
-    status_path_fg:  Color, status_path_bg:  Color,
-    status_msg_fg:   Color, status_msg_bg:   Color,
-    status_err_fg:   Color, status_err_bg:   Color,
-    status_yank_fg:  Color, status_yank_bg:  Color,
-    status_sel_fg:   Color, status_sel_bg:   Color,
-    status_hint_fg:  Color,
-    status_bar_fg:   Color, status_bar_bg:   Color,
-    // Overlays
-    popup_border_fg: Color, popup_bg:        Color,
-    popup_text_fg:   Color, popup_dim_fg:    Color,
-    // Progress bar
-    progress_filled_fg: Color, progress_empty_fg: Color,
-    // Settings UI
-    settings_key_fg:    Color, settings_val_fg:    Color,
-    settings_cursor_fg: Color, settings_cursor_bg: Color,
-    // Unsaved / warning highlight
-    warn_fg: Color, warn_bg: Color,
+pub struct Theme {
+    base:     Color, surface0: Color, surface1: Color,
+    overlay0: Color, text:     Color, subtext:  Color,
+    mauve:    Color, blue:     Color, teal:     Color,
+    green:    Color, red:      Color, yellow:   Color,
+    pink:     Color,
 }
 
 impl Theme {
-    /// Resolve a theme by name from user themes, falling back to a default dark theme.
+    /// Resolve a theme by name, checking user themes first, then built-ins.
     fn resolve(name: &str, user_themes: &[UserThemeEntry]) -> Self {
         if let Some(ut) = user_themes.iter().find(|t| t.name == name) {
             return ut.to_theme();
         }
-        Self::fallback()
+        Self::by_name(name)
     }
 
-    /// All theme names from user theme files only.
+    /// All theme names (built-in + user), deduplicated (user wins on collision).
     fn all_names_merged(user_themes: &[UserThemeEntry]) -> Vec<String> {
-        user_themes.iter().map(|u| u.name.clone()).collect()
+        let mut names: Vec<String> = Self::builtin_names()
+            .iter()
+            .filter(|&&n| !user_themes.iter().any(|u| u.name == n))
+            .map(|&s| s.to_string())
+            .collect();
+        for ut in user_themes {
+            names.push(ut.name.clone());
+        }
+        names
     }
 
-    /// Fallback theme (catppuccin-macchiato palette) used when no theme file is found.
-    fn fallback() -> Self {
-        let base     = Color::Rgb(30, 32, 48);    let surface0 = Color::Rgb(54, 58, 79);
-        let surface1 = Color::Rgb(73, 77,100);    let overlay0 = Color::Rgb(110,115,141);
-        let text     = Color::Rgb(202,211,245);   let subtext  = Color::Rgb(165,173,203);
-        let mauve    = Color::Rgb(198,160,246);   let blue     = Color::Rgb(138,173,244);
-        let teal     = Color::Rgb(139,213,202);   let green    = Color::Rgb(166,218,149);
-        let red      = Color::Rgb(237,135,150);   let yellow   = Color::Rgb(238,212,159);
-        let pink     = Color::Rgb(245,189,230);
-        Self {
-            base, surface0, text,
-            tab_active_fg: base,      tab_active_bg: mauve,
-            tab_inactive_fg: subtext, tab_inactive_bg: surface0,
-            cursor_fg: base,    cursor_bg: mauve,
-            selected_fg: mauve, selected_bg: surface0,
-            border_fg: surface1, panel_bg: base, title_fg: blue,
-            color_dir: blue,    color_symlink: pink,
-            color_image: mauve, color_video: mauve,  color_audio: pink,
-            color_archive: yellow, color_doc: teal,
-            color_code: green,  color_exec: red,     color_other: text,
-            status_path_fg: base,    status_path_bg: blue,
-            status_msg_fg: base,     status_msg_bg: teal,
-            status_err_fg: base,     status_err_bg: red,
-            status_yank_fg: base,    status_yank_bg: yellow,
-            status_sel_fg: base,     status_sel_bg: mauve,
-            status_hint_fg: mauve,
-            status_bar_fg: subtext,  status_bar_bg: surface0,
-            popup_border_fg: mauve,  popup_bg: base,
-            popup_text_fg: text,     popup_dim_fg: overlay0,
-            progress_filled_fg: mauve, progress_empty_fg: surface1,
-            settings_key_fg: blue,   settings_val_fg: text,
-            settings_cursor_fg: base, settings_cursor_bg: mauve,
-            warn_fg: base, warn_bg: yellow,
+    fn by_name(name: &str) -> Self {
+        match name {
+            "catppuccin-latte" => Self {
+                base:     Color::Rgb(239,241,245), surface0: Color::Rgb(204,208,218),
+                surface1: Color::Rgb(188,192,204), overlay0: Color::Rgb(156,160,176),
+                text:     Color::Rgb(76,79,105),   subtext:  Color::Rgb(92,95,119),
+                mauve:    Color::Rgb(136,57,239),  blue:     Color::Rgb(30,102,245),
+                teal:     Color::Rgb(23,146,153),  green:    Color::Rgb(64,160,43),
+                red:      Color::Rgb(210,15,57),   yellow:   Color::Rgb(223,142,29),
+                pink:     Color::Rgb(234,118,203),
+            },
+            "catppuccin-frappe" => Self {
+                base:     Color::Rgb(48,52,70),    surface0: Color::Rgb(65,69,89),
+                surface1: Color::Rgb(81,87,109),   overlay0: Color::Rgb(115,121,148),
+                text:     Color::Rgb(198,208,245), subtext:  Color::Rgb(181,191,226),
+                mauve:    Color::Rgb(202,158,230), blue:     Color::Rgb(140,170,238),
+                teal:     Color::Rgb(129,200,190), green:    Color::Rgb(166,209,137),
+                red:      Color::Rgb(231,130,132), yellow:   Color::Rgb(229,200,144),
+                pink:     Color::Rgb(244,184,228),
+            },
+            "catppuccin-mocha" => Self {
+                base:     Color::Rgb(30,30,46),    surface0: Color::Rgb(49,50,68),
+                surface1: Color::Rgb(69,71,90),    overlay0: Color::Rgb(108,112,134),
+                text:     Color::Rgb(205,214,244), subtext:  Color::Rgb(166,173,200),
+                mauve:    Color::Rgb(203,166,247), blue:     Color::Rgb(137,180,250),
+                teal:     Color::Rgb(148,226,213), green:    Color::Rgb(166,227,161),
+                red:      Color::Rgb(243,139,168), yellow:   Color::Rgb(249,226,175),
+                pink:     Color::Rgb(245,194,231),
+            },
+            "tokyo-night" => Self {
+                base:     Color::Rgb(26,27,38),    surface0: Color::Rgb(36,40,59),
+                surface1: Color::Rgb(52,59,88),    overlay0: Color::Rgb(86,95,137),
+                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(169,177,214),
+                mauve:    Color::Rgb(187,154,247), blue:     Color::Rgb(122,162,247),
+                teal:     Color::Rgb(42,195,222),  green:    Color::Rgb(158,206,106),
+                red:      Color::Rgb(247,118,142), yellow:   Color::Rgb(224,175,104),
+                pink:     Color::Rgb(255,121,198),
+            },
+            "tokyo-night-storm" => Self {
+                base:     Color::Rgb(35,38,52),    surface0: Color::Rgb(42,46,62),
+                surface1: Color::Rgb(57,62,80),    overlay0: Color::Rgb(86,95,137),
+                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(169,177,214),
+                mauve:    Color::Rgb(187,154,247), blue:     Color::Rgb(122,162,247),
+                teal:     Color::Rgb(42,195,222),  green:    Color::Rgb(158,206,106),
+                red:      Color::Rgb(247,118,142), yellow:   Color::Rgb(224,175,104),
+                pink:     Color::Rgb(255,121,198),
+            },
+            "tokyo-night-light" => Self {
+                base:     Color::Rgb(213,214,219), surface0: Color::Rgb(195,197,210),
+                surface1: Color::Rgb(180,182,198), overlay0: Color::Rgb(136,139,163),
+                text:     Color::Rgb(52,59,88),    subtext:  Color::Rgb(86,95,137),
+                mauve:    Color::Rgb(122,78,203),  blue:     Color::Rgb(52,101,196),
+                teal:     Color::Rgb(0,150,170),   green:    Color::Rgb(74,153,46),
+                red:      Color::Rgb(194,48,74),   yellow:   Color::Rgb(143,110,37),
+                pink:     Color::Rgb(175,65,148),
+            },
+            "gruvbox-dark" => Self {
+                base:     Color::Rgb(40,40,40),    surface0: Color::Rgb(60,56,54),
+                surface1: Color::Rgb(80,73,69),    overlay0: Color::Rgb(124,111,100),
+                text:     Color::Rgb(235,219,178), subtext:  Color::Rgb(213,196,161),
+                mauve:    Color::Rgb(211,134,155), blue:     Color::Rgb(131,165,152),
+                teal:     Color::Rgb(142,192,124), green:    Color::Rgb(184,187,38),
+                red:      Color::Rgb(251,73,52),   yellow:   Color::Rgb(250,189,47),
+                pink:     Color::Rgb(211,134,155),
+            },
+            "gruvbox-light" => Self {
+                base:     Color::Rgb(251,241,199), surface0: Color::Rgb(235,219,178),
+                surface1: Color::Rgb(213,196,161), overlay0: Color::Rgb(189,174,147),
+                text:     Color::Rgb(60,56,54),    subtext:  Color::Rgb(80,73,69),
+                mauve:    Color::Rgb(143,63,113),  blue:     Color::Rgb(69,133,136),
+                teal:     Color::Rgb(121,116,14),  green:    Color::Rgb(121,116,14),
+                red:      Color::Rgb(204,36,29),   yellow:   Color::Rgb(215,153,33),
+                pink:     Color::Rgb(143,63,113),
+            },
+            "nord" => Self {
+                base:     Color::Rgb(46,52,64),    surface0: Color::Rgb(59,66,82),
+                surface1: Color::Rgb(67,76,94),    overlay0: Color::Rgb(76,86,106),
+                text:     Color::Rgb(236,239,244), subtext:  Color::Rgb(229,233,240),
+                mauve:    Color::Rgb(180,142,173), blue:     Color::Rgb(136,192,208),
+                teal:     Color::Rgb(143,188,187), green:    Color::Rgb(163,190,140),
+                red:      Color::Rgb(191,97,106),  yellow:   Color::Rgb(235,203,139),
+                pink:     Color::Rgb(180,142,173),
+            },
+            "dracula" => Self {
+                base:     Color::Rgb(40,42,54),    surface0: Color::Rgb(50,52,65),
+                surface1: Color::Rgb(68,71,90),    overlay0: Color::Rgb(98,114,164),
+                text:     Color::Rgb(248,248,242), subtext:  Color::Rgb(191,192,197),
+                mauve:    Color::Rgb(189,147,249), blue:     Color::Rgb(139,233,253),
+                teal:     Color::Rgb(80,250,123),  green:    Color::Rgb(80,250,123),
+                red:      Color::Rgb(255,85,85),   yellow:   Color::Rgb(241,250,140),
+                pink:     Color::Rgb(255,121,198),
+            },
+            "rose-pine" => Self {
+                base:     Color::Rgb(25,23,36),    surface0: Color::Rgb(31,29,46),
+                surface1: Color::Rgb(38,35,58),    overlay0: Color::Rgb(110,106,134),
+                text:     Color::Rgb(224,222,244), subtext:  Color::Rgb(144,140,170),
+                mauve:    Color::Rgb(196,167,231), blue:     Color::Rgb(156,207,216),
+                teal:     Color::Rgb(156,207,216), green:    Color::Rgb(156,207,216),
+                red:      Color::Rgb(235,111,146), yellow:   Color::Rgb(246,193,119),
+                pink:     Color::Rgb(235,111,146),
+            },
+            "rose-pine-moon" => Self {
+                base:     Color::Rgb(35,33,54),    surface0: Color::Rgb(42,39,63),
+                surface1: Color::Rgb(57,53,82),    overlay0: Color::Rgb(110,106,134),
+                text:     Color::Rgb(224,222,244), subtext:  Color::Rgb(144,140,170),
+                mauve:    Color::Rgb(196,167,231), blue:     Color::Rgb(156,207,216),
+                teal:     Color::Rgb(156,207,216), green:    Color::Rgb(156,207,216),
+                red:      Color::Rgb(235,111,146), yellow:   Color::Rgb(246,193,119),
+                pink:     Color::Rgb(235,111,146),
+            },
+            "rose-pine-dawn" => Self {
+                base:     Color::Rgb(250,244,237), surface0: Color::Rgb(242,233,222),
+                surface1: Color::Rgb(233,220,204), overlay0: Color::Rgb(152,147,165),
+                text:     Color::Rgb(87,82,121),   subtext:  Color::Rgb(121,117,147),
+                mauve:    Color::Rgb(144,122,169), blue:     Color::Rgb(86,148,159),
+                teal:     Color::Rgb(86,148,159),  green:    Color::Rgb(86,148,159),
+                red:      Color::Rgb(180,99,122),  yellow:   Color::Rgb(234,157,52),
+                pink:     Color::Rgb(180,99,122),
+            },
+            "onedark" => Self {
+                base:     Color::Rgb(40,44,52),    surface0: Color::Rgb(49,53,63),
+                surface1: Color::Rgb(57,62,73),    overlay0: Color::Rgb(92,99,112),
+                text:     Color::Rgb(171,178,191), subtext:  Color::Rgb(152,159,172),
+                mauve:    Color::Rgb(198,120,221), blue:     Color::Rgb(97,175,239),
+                teal:     Color::Rgb(86,182,194),  green:    Color::Rgb(152,195,121),
+                red:      Color::Rgb(224,108,117), yellow:   Color::Rgb(229,192,123),
+                pink:     Color::Rgb(198,120,221),
+            },
+            "solarized-dark" => Self {
+                base:     Color::Rgb(0,43,54),     surface0: Color::Rgb(7,54,66),
+                surface1: Color::Rgb(88,110,117),  overlay0: Color::Rgb(101,123,131),
+                text:     Color::Rgb(253,246,227), subtext:  Color::Rgb(238,232,213),
+                mauve:    Color::Rgb(108,113,196), blue:     Color::Rgb(38,139,210),
+                teal:     Color::Rgb(42,161,152),  green:    Color::Rgb(133,153,0),
+                red:      Color::Rgb(220,50,47),   yellow:   Color::Rgb(181,137,0),
+                pink:     Color::Rgb(211,54,130),
+            },
+            "solarized-light" => Self {
+                base:     Color::Rgb(253,246,227), surface0: Color::Rgb(238,232,213),
+                surface1: Color::Rgb(214,210,196), overlay0: Color::Rgb(147,161,161),
+                text:     Color::Rgb(7,54,66),     subtext:  Color::Rgb(88,110,117),
+                mauve:    Color::Rgb(108,113,196), blue:     Color::Rgb(38,139,210),
+                teal:     Color::Rgb(42,161,152),  green:    Color::Rgb(133,153,0),
+                red:      Color::Rgb(220,50,47),   yellow:   Color::Rgb(181,137,0),
+                pink:     Color::Rgb(211,54,130),
+            },
+            "material-ocean" => Self {
+                base:     Color::Rgb(15,17,26),    surface0: Color::Rgb(27,30,44),
+                surface1: Color::Rgb(36,40,59),    overlay0: Color::Rgb(84,91,130),
+                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(137,148,196),
+                mauve:    Color::Rgb(199,146,234), blue:     Color::Rgb(130,170,255),
+                teal:     Color::Rgb(137,221,255), green:    Color::Rgb(195,232,141),
+                red:      Color::Rgb(255,85,114),  yellow:   Color::Rgb(255,203,107),
+                pink:     Color::Rgb(199,146,234),
+            },
+            "everforest-dark" => Self {
+                base:     Color::Rgb(35,38,33),    surface0: Color::Rgb(45,50,42),
+                surface1: Color::Rgb(57,62,51),    overlay0: Color::Rgb(131,139,117),
+                text:     Color::Rgb(211,198,170), subtext:  Color::Rgb(157,151,132),
+                mauve:    Color::Rgb(214,153,182), blue:     Color::Rgb(127,187,179),
+                teal:     Color::Rgb(131,192,170), green:    Color::Rgb(167,192,128),
+                red:      Color::Rgb(230,126,128), yellow:   Color::Rgb(219,188,127),
+                pink:     Color::Rgb(214,153,182),
+            },
+            "kanagawa" => Self {
+                base:     Color::Rgb(22,22,29),    surface0: Color::Rgb(31,31,40),
+                surface1: Color::Rgb(42,42,54),    overlay0: Color::Rgb(84,84,109),
+                text:     Color::Rgb(220,215,186), subtext:  Color::Rgb(150,147,125),
+                mauve:    Color::Rgb(152,110,175), blue:     Color::Rgb(125,167,216),
+                teal:     Color::Rgb(106,153,153), green:    Color::Rgb(118,148,106),
+                red:      Color::Rgb(196,95,106),  yellow:   Color::Rgb(195,171,97),
+                pink:     Color::Rgb(210,126,153),
+            },
+            "ayu-dark" => Self {
+                base:     Color::Rgb(13,17,23),    surface0: Color::Rgb(20,25,33),
+                surface1: Color::Rgb(30,37,48),    overlay0: Color::Rgb(72,82,99),
+                text:     Color::Rgb(203,214,226), subtext:  Color::Rgb(131,148,168),
+                mauve:    Color::Rgb(213,121,255), blue:     Color::Rgb(83,154,252),
+                teal:     Color::Rgb(149,230,203), green:    Color::Rgb(186,230,126),
+                red:      Color::Rgb(255,51,51),   yellow:   Color::Rgb(255,180,84),
+                pink:     Color::Rgb(255,130,200),
+            },
+            // default: catppuccin-macchiato
+            _ => Self {
+                base:     Color::Rgb(30,32,48),    surface0: Color::Rgb(54,58,79),
+                surface1: Color::Rgb(73,77,100),   overlay0: Color::Rgb(110,115,141),
+                text:     Color::Rgb(202,211,245), subtext:  Color::Rgb(165,173,203),
+                mauve:    Color::Rgb(198,160,246), blue:     Color::Rgb(138,173,244),
+                teal:     Color::Rgb(139,213,202), green:    Color::Rgb(166,218,149),
+                red:      Color::Rgb(237,135,150), yellow:   Color::Rgb(238,212,159),
+                pink:     Color::Rgb(245,189,230),
+            },
         }
     }
 
+    fn builtin_names() -> &'static [&'static str] {
+        &[
+            "catppuccin-macchiato", "catppuccin-latte", "catppuccin-frappe", "catppuccin-mocha",
+            "tokyo-night", "tokyo-night-storm", "tokyo-night-light",
+            "gruvbox-dark", "gruvbox-light",
+            "nord", "dracula",
+            "rose-pine", "rose-pine-moon", "rose-pine-dawn",
+            "onedark",
+            "solarized-dark", "solarized-light",
+            "material-ocean", "everforest-dark",
+            "kanagawa", "ayu-dark",
+        ]
+    }
 }
 
-/// The active icon set is always a loaded UserIconEntry.
-/// The built-in sets (nerdfont, emoji, minimal, none) are shipped as JSON files
-/// in ~/.local/share/fd-files/icons/ — there is no hardcoded fallback logic.
-/// If the configured set cannot be found, icons are simply empty strings.
+// ─── Icon sets ────────────────────────────────────────────────────────────────
 #[derive(Clone, PartialEq)]
-struct ResolvedIconSet(Option<String>); // holds the set name, looked up in user_icons at call time
+enum IconSet { NerdFont, Emoji, Minimal, None }
 
-impl ResolvedIconSet {
-    fn resolve(name: &str, user_icons: &[UserIconEntry]) -> Self {
-        if user_icons.iter().any(|u| u.name == name) {
-            Self(Some(name.to_string()))
-        } else {
-            Self(None) // set not found → silent empty icons
+impl IconSet {
+    fn by_name(name: &str) -> Self {
+        match name {
+            "emoji"   => Self::Emoji,
+            "minimal" => Self::Minimal,
+            "none"    => Self::None,
+            _         => Self::NerdFont,
         }
     }
-
-    /// All icon set names from loaded files.
-    fn all_names_merged(user_icons: &[UserIconEntry]) -> Vec<String> {
-        user_icons.iter().map(|u| u.name.clone()).collect()
-    }
-}
-
-fn get_icon(path: &Path, kind: &FileKind, icon_set: &ResolvedIconSet, user_icons: &[UserIconEntry]) -> String {
-    let name = match &icon_set.0 { Some(n) => n, None => return String::new() };
-    if let Some(entry) = user_icons.iter().find(|u| &u.name == name) {
-        return entry.get_icon(path, kind);
-    }
-    String::new()
 }
 
 fn st(fg: Color) -> Style { Style::default().fg(fg) }
@@ -557,10 +435,6 @@ pub struct Config {
     pub opener_doc:        String,
     pub opener_editor:     String,
     pub opener_archive:    String,
-    // Terminal emulator used to run executables and shell scripts.
-    // The command is launched as:  <opener_terminal> -- <program>
-    // Examples: "kitty", "foot", "alacritty", "wezterm start"
-    pub opener_terminal:   String,
     pub key_copy:          String,
     pub key_cut:           String,
     pub key_paste:         String,
@@ -573,7 +447,6 @@ pub struct Config {
     pub key_quit:          String,
     pub key_new_tab:       String,
     pub key_close_tab:     String,
-    pub key_switch_tab:    String,
     pub key_select:        String,
     pub key_select_all:    String,
 }
@@ -587,14 +460,12 @@ impl Default for Config {
             opener_image: "mirage".into(), opener_video: "mpv".into(),
             opener_audio: "mpv".into(), opener_doc: "libreoffice".into(),
             opener_editor: "nvim".into(), opener_archive: "ouch decompress".into(),
-            opener_terminal: String::new(), // auto-detected at startup
             key_copy: "c".into(), key_cut: "u".into(), key_paste: "p".into(),
             key_delete: "d".into(), key_rename: "r".into(),
             key_new_file: "f".into(), key_new_dir: "m".into(),
             key_search: "/".into(), key_toggle_hidden: ".".into(),
-            key_quit: "q".into(), key_new_tab: "t".into(),
-            key_close_tab: "x".into(), key_switch_tab: "Tab".into(),
-            key_select: "Space".into(),
+            key_quit: "q".into(), key_new_tab: "Tab".into(),
+            key_close_tab: "Tab+r".into(), key_select: "Space".into(),
             key_select_all: "Ctrl+a".into(),
         }
     }
@@ -622,13 +493,7 @@ impl Config {
     }
 }
 
-// Shell script extensions — these are run in a new terminal with their
-// appropriate interpreter even if they don't have the execute bit set.
-const SHELL_EXT: &[&str] = &["sh","bash","zsh","fish"];
-/// Java archive — run with `java -jar <file>` in a new terminal window.
-const JAVA_EXT:  &[&str] = &["jar"];
-
-
+// ─── File types ───────────────────────────────────────────────────────────────
 const IMAGE_EXT:   &[&str] = &["png","jpg","jpeg","gif","bmp","webp","svg","ico","tiff","avif"];
 const VIDEO_EXT:   &[&str] = &["mp4","mkv","avi","mov","webm","flv","wmv","m4v","mpg","mpeg"];
 const AUDIO_EXT:   &[&str] = &["mp3","flac","ogg","wav","aac","m4a","opus","wma"];
@@ -666,11 +531,140 @@ fn file_kind(path: &Path) -> FileKind {
 
 fn kind_color(k: &FileKind, t: &Theme) -> Color {
     match k {
-        FileKind::Dir     => t.color_dir,     FileKind::Image   => t.color_image,
-        FileKind::Video   => t.color_video,   FileKind::Audio   => t.color_audio,
-        FileKind::Archive => t.color_archive, FileKind::Doc     => t.color_doc,
-        FileKind::Code    => t.color_code,    FileKind::Exec    => t.color_exec,
-        FileKind::Symlink => t.color_symlink, FileKind::Other   => t.color_other,
+        FileKind::Dir     => t.blue,  FileKind::Image   => t.pink,
+        FileKind::Video   => t.mauve, FileKind::Audio   => t.mauve,
+        FileKind::Archive => t.red,   FileKind::Doc     => t.yellow,
+        FileKind::Code    => t.green, FileKind::Exec    => t.teal,
+        FileKind::Symlink => t.teal,  FileKind::Other   => t.text,
+    }
+}
+
+fn named_dir_icon(name: &str, icon_set: &IconSet) -> Option<&'static str> {
+    match icon_set {
+        IconSet::Emoji => match name {
+            ".config"|".local"|".cache" => Some("⚙️ "),
+            ".ssh"                      => Some("🔒"),
+            ".git"|".github"            => Some("🐙"),
+            "downloads"                 => Some("⬇️ "),
+            "documents"                 => Some("📄"),
+            "desktop"                   => Some("🖥️ "),
+            "pictures"|"photos"|"images"=> Some("🖼️ "),
+            "videos"                    => Some("🎬"),
+            "music"|"audio"             => Some("🎵"),
+            "games"                     => Some("🎮"),
+            "projects"|"dev"|"code"|"src"=>Some("💻"),
+            _                           => None,
+        },
+        IconSet::Minimal => Some("▸"),
+        IconSet::None    => Some(""),
+        IconSet::NerdFont => match name {
+            ".config"                           => Some("\u{e5fc}"),
+            ".local"                            => Some("\u{f015}"),
+            ".cache"                            => Some("\u{f0c7}"),
+            ".ssh"                              => Some("\u{f023}"),
+            ".git" | ".github"                  => Some("\u{e702}"),
+            "downloads"                         => Some("\u{f019}"),
+            "documents"                         => Some("\u{f02d}"),
+            "desktop"                           => Some("\u{f108}"),
+            "pictures" | "photos" | "images"    => Some("\u{f03e}"),
+            "videos"                            => Some("\u{f03d}"),
+            "music" | "audio"                   => Some("\u{f001}"),
+            "games"                             => Some("\u{f11b}"),
+            "projects" | "dev" | "code" | "src" => Some("\u{e60c}"),
+            "home"                              => Some("\u{f015}"),
+            "tmp" | "temp"                      => Some("\u{f0c9}"),
+            "bin"                               => Some("\u{f489}"),
+            "lib" | "lib64"                     => Some("\u{f121}"),
+            "etc"                               => Some("\u{f013}"),
+            "usr"                               => Some("\u{f007}"),
+            "var"                               => Some("\u{f1c0}"),
+            "opt"                               => Some("\u{f187}"),
+            "boot"                              => Some("\u{f0a0}"),
+            "root"                              => Some("\u{f023}"),
+            "node_modules"                      => Some("\u{e718}"),
+            "target"                            => Some("\u{f140}"),
+            "public"                            => Some("\u{f0ac}"),
+            "fonts"                             => Some("\u{f031}"),
+            "themes"                            => Some("\u{f53f}"),
+            "icons"                             => Some("\u{f03e}"),
+            "wallpapers" | "walls"              => Some("\u{f03e}"),
+            "scripts"                           => Some("\u{f489}"),
+            "dotfiles"                          => Some("\u{e615}"),
+            _                                   => None,
+        },
+    }
+}
+
+fn file_icon(path: &Path, kind: &FileKind, icon_set: &IconSet) -> &'static str {
+    match icon_set {
+        IconSet::None    => "",
+        IconSet::Minimal => match kind {
+            FileKind::Dir     => "▸",
+            FileKind::Symlink => "↪",
+            FileKind::Image   => "i",
+            FileKind::Video   => "v",
+            FileKind::Audio   => "a",
+            FileKind::Archive => "z",
+            FileKind::Doc     => "d",
+            FileKind::Code    => "c",
+            FileKind::Exec    => "x",
+            FileKind::Other   => "f",
+        },
+        IconSet::Emoji => match kind {
+            FileKind::Dir     => "📁",
+            FileKind::Symlink => "🔗",
+            FileKind::Image   => "🖼 ",
+            FileKind::Video   => "🎬",
+            FileKind::Audio   => "🎵",
+            FileKind::Archive => "📦",
+            FileKind::Doc     => "📄",
+            FileKind::Code    => "📝",
+            FileKind::Exec    => "⚙ ",
+            FileKind::Other   => "📄",
+        },
+        IconSet::NerdFont => {
+            if *kind == FileKind::Dir {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                if let Some(ic) = named_dir_icon(&name, icon_set) { return ic; }
+                return "\u{f07b}";
+            }
+            if *kind == FileKind::Symlink { return "\u{f0c1}"; }
+            let ext  = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            match name.as_str() {
+                ".bashrc"|".bash_profile"|".bash_history" => return "\u{f489}",
+                ".zshrc"|".zshenv"|".zprofile"            => return "\u{f489}",
+                ".gitconfig"|".gitignore"|".gitmodules"   => return "\u{e702}",
+                "makefile"|"gnumakefile"                  => return "\u{f423}",
+                "dockerfile"                              => return "\u{f308}",
+                "cargo.toml"|"cargo.lock"                 => return "\u{e7a8}",
+                "package.json"|"package-lock.json"        => return "\u{e718}",
+                "readme.md"|"readme.txt"|"readme"         => return "\u{f48a}",
+                _ => {}
+            }
+            match ext.as_str() {
+                "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"ico"|"svg"|"tiff"|"avif" => "\u{f03e}",
+                "mp4"|"mkv"|"avi"|"mov"|"webm"|"flv"|"wmv"  => "\u{f03d}",
+                "mp3"|"flac"|"ogg"|"wav"|"aac"|"m4a"|"opus" => "\u{f001}",
+                "zip"|"tar"|"gz"|"bz2"|"xz"|"zst"|"tgz"|"7z"|"rar"|"tbz2" => "\u{f410}",
+                "pdf"        => "\u{f1c1}", "doc"|"docx" => "\u{f1c2}",
+                "xls"|"xlsx" => "\u{f1c3}", "ppt"|"pptx" => "\u{f1c4}",
+                "rs"  => "\u{e7a8}", "py"  => "\u{e606}", "js"|"mjs" => "\u{e74e}",
+                "ts"  => "\u{e628}", "go"  => "\u{e626}", "c"        => "\u{e61e}",
+                "cpp"|"cc"|"cxx" => "\u{e61d}", "h"|"hpp" => "\u{f0fd}",
+                "java" => "\u{e738}", "rb"  => "\u{e739}", "php" => "\u{e73d}",
+                "sh"|"bash"|"zsh"|"fish" => "\u{f489}",
+                "lua" => "\u{e620}", "vim" => "\u{e62b}", "toml" => "\u{f669}",
+                "yaml"|"yml" => "\u{f481}", "json" => "\u{e60b}", "xml" => "\u{f72d}",
+                "html"|"htm" => "\u{f13b}", "css" => "\u{e749}", "scss"|"sass" => "\u{e603}",
+                "md"|"markdown" => "\u{f48a}", "txt"|"rst" => "\u{f15c}",
+                "conf"|"ini"|"cfg" => "\u{f013}", "env" => "\u{f462}",
+                "lock" => "\u{f023}", "log" => "\u{f18d}",
+                "ttf"|"otf"|"woff"|"woff2" => "\u{f031}",
+                _ if *kind == FileKind::Exec => "\u{f489}",
+                _ => "\u{f15b}",
+            }
+        }
     }
 }
 
@@ -729,163 +723,15 @@ fn dirs_home() -> PathBuf {
 fn which(cmd: &str) -> bool {
     Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
 }
-
-/// Parse a config key string like "c", "Ctrl+c", "Alt+x" into a
-/// (KeyCode, KeyModifiers) pair so configured keybinds actually work.
-fn parse_key(s: &str) -> Option<(KeyCode, KeyModifiers)> {
-    let s = s.trim();
-    if s.is_empty() { return None; }
-
-    // Split off modifier prefix(es): "Ctrl+Shift+x" → mods=CONTROL|SHIFT, key="x"
-    let mut mods = KeyModifiers::NONE;
-    let mut rest = s;
-    loop {
-        if let Some(r) = rest.strip_prefix("Ctrl+").or_else(|| rest.strip_prefix("ctrl+")) {
-            mods |= KeyModifiers::CONTROL; rest = r;
-        } else if let Some(r) = rest.strip_prefix("Alt+").or_else(|| rest.strip_prefix("alt+")) {
-            mods |= KeyModifiers::ALT; rest = r;
-        } else if let Some(r) = rest.strip_prefix("Shift+").or_else(|| rest.strip_prefix("shift+")) {
-            mods |= KeyModifiers::SHIFT; rest = r;
-        } else {
-            break;
-        }
-    }
-
-    let code = match rest {
-        "Space" | "space"   => KeyCode::Char(' '),
-        "Enter" | "enter"   => KeyCode::Enter,
-        "Esc"   | "esc"     => KeyCode::Esc,
-        "Tab"   | "tab"     => KeyCode::Tab,
-        "Backspace"         => KeyCode::Backspace,
-        "Delete"            => KeyCode::Delete,
-        "Up"                => KeyCode::Up,
-        "Down"              => KeyCode::Down,
-        "Left"              => KeyCode::Left,
-        "Right"             => KeyCode::Right,
-        "Home"              => KeyCode::Home,
-        "End"               => KeyCode::End,
-        "PageUp"            => KeyCode::PageUp,
-        "PageDown"          => KeyCode::PageDown,
-        c if c.chars().count() == 1 => KeyCode::Char(c.chars().next().unwrap()),
-        _ => return None,
-    };
-    Some((code, mods))
-}
-
-/// Returns true if `key`+`mods` matches the configured string `cfg_key`.
-fn key_matches(key: KeyCode, mods: KeyModifiers, cfg_key: &str) -> bool {
-    match parse_key(cfg_key) {
-        Some((k, m)) => k == key && m == mods,
-        None         => false,
-    }
-}
-// ─── Progress-aware file operations ──────────────────────────────────────────
-
-/// A single progress update sent from the background worker to the UI thread.
-#[derive(Debug)]
-enum ProgressUpdate {
-    /// How many total bytes need to be transferred across all files.
-    TotalBytes(u64),
-    /// Bytes transferred so far (cumulative).
-    BytesDone(u64),
-    /// Name of the file currently being processed.
-    CurrentFile(String),
-    /// The operation finished successfully.
-    Done,
-    /// The operation failed with this error string.
-    Error(String),
-}
-
-/// Chunk size used when copying file data — 4 MiB gives good throughput
-/// without burning too much memory.
-const COPY_CHUNK: usize = 4 * 1024 * 1024;
-
-/// Recursively calculate the total byte size of a path (file or directory).
-fn total_size(path: &Path) -> u64 {
-    if path.is_dir() {
-        fs::read_dir(path)
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| total_size(&e.path())).sum())
-            .unwrap_or(0)
-    } else {
-        path.metadata().map(|m| m.len()).unwrap_or(0)
-    }
-}
-
-/// Copy a single file in chunks, reporting byte progress through `tx`.
-/// `done_so_far` is the running total before this file started.
-fn copy_file_progress(
-    src: &Path,
-    dst: &Path,
-    done_so_far: &mut u64,
-    tx: &mpsc::Sender<ProgressUpdate>,
-    cancel: &Arc<AtomicBool>,
-) -> io::Result<()> {
-    let name = src.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("…")
-        .to_string();
-    let _ = tx.send(ProgressUpdate::CurrentFile(name));
-
-    let mut src_file = fs::File::open(src)?;
-    // Create parent dirs if needed (can happen deep in a directory tree).
-    if let Some(par) = dst.parent() { fs::create_dir_all(par)?; }
-    let mut dst_file = fs::File::create(dst)?;
-
-    let mut buf = vec![0u8; COPY_CHUNK];
-    loop {
-        // Respect cancellation requests.
-        if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        let n = src_file.read(&mut buf)?;
-        if n == 0 { break; }
-        dst_file.write_all(&buf[..n])?;
-        *done_so_far += n as u64;
-        let _ = tx.send(ProgressUpdate::BytesDone(*done_so_far));
-    }
-    Ok(())
-}
-
-/// Recursively copy a directory tree, reporting progress for each file.
-fn copy_dir_progress(
-    src: &Path,
-    dst: &Path,
-    done_so_far: &mut u64,
-    tx: &mpsc::Sender<ProgressUpdate>,
-    cancel: &Arc<AtomicBool>,
-) -> io::Result<()> {
+fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
         let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_progress(&src_path, &dst_path, done_so_far, tx, cancel)?;
-        } else {
-            copy_file_progress(&src_path, &dst_path, done_so_far, tx, cancel)?;
-        }
+        let ty = entry.file_type()?;
+        if ty.is_dir() { copy_dir(&entry.path(), &dst.join(entry.file_name()))?; }
+        else { fs::copy(entry.path(), dst.join(entry.file_name()))?; }
     }
     Ok(())
-}
-
-/// Recursively delete a path, reporting the name of each item as it is removed.
-fn delete_path_progress(
-    path: &Path,
-    tx: &mpsc::Sender<ProgressUpdate>,
-    cancel: &Arc<AtomicBool>,
-) -> io::Result<()> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-    }
-    let name = path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("…")
-        .to_string();
-    let _ = tx.send(ProgressUpdate::CurrentFile(name));
-    if path.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
@@ -912,12 +758,11 @@ impl SettingsState {
             ],
             SettingsSection::Appearance => vec![
                 ("col_parent","Parent pane width (%)"), ("col_files","Files pane width (%)"),
-                ("theme","Theme"), ("icon_set","Icon set"),
+                ("theme","Theme"), ("icon_set","Icon set (nerdfont/emoji/minimal/none)"),
             ],
             SettingsSection::Openers    => vec![
                 ("opener_image","Image"), ("opener_video","Video"), ("opener_audio","Audio"),
                 ("opener_doc","Documents"), ("opener_editor","Editor"), ("opener_archive","Archives"),
-                ("opener_terminal","Terminal  (for exec / scripts)"),
             ],
             SettingsSection::Keybinds   => vec![
                 ("key_copy","Copy"), ("key_cut","Cut"), ("key_paste","Paste"),
@@ -925,15 +770,15 @@ impl SettingsState {
                 ("key_new_file","New file"), ("key_new_dir","New directory"),
                 ("key_search","Search"), ("key_toggle_hidden","Toggle hidden"),
                 ("key_quit","Quit"), ("key_new_tab","New tab"),
-                ("key_close_tab","Close tab"), ("key_switch_tab","Switch tab"),
-                ("key_select","Select"), ("key_select_all","Select all"),
+                ("key_close_tab","Close tab"), ("key_select","Select"),
+                ("key_select_all","Select all"),
             ],
         }
     }
-    fn dropdown_options(key: &str, user_themes: &[UserThemeEntry], user_icons: &[UserIconEntry]) -> Option<Vec<String>> {
+    fn dropdown_options(key: &str, user_themes: &[UserThemeEntry]) -> Option<Vec<String>> {
         match key {
             "theme"       => Some(Theme::all_names_merged(user_themes)),
-            "icon_set"    => Some(ResolvedIconSet::all_names_merged(user_icons)),
+            "icon_set"    => Some(vec!["nerdfont","emoji","minimal","none"].iter().map(|s| s.to_string()).collect()),
             "show_hidden" => Some(vec!["true".to_string(), "false".to_string()]),
             _ => None,
         }
@@ -952,7 +797,6 @@ impl SettingsState {
             "opener_doc"        => cfg.opener_doc.clone(),
             "opener_editor"     => cfg.opener_editor.clone(),
             "opener_archive"    => cfg.opener_archive.clone(),
-            "opener_terminal"   => cfg.opener_terminal.clone(),
             "key_copy"          => cfg.key_copy.clone(),
             "key_cut"           => cfg.key_cut.clone(),
             "key_paste"         => cfg.key_paste.clone(),
@@ -965,7 +809,6 @@ impl SettingsState {
             "key_quit"          => cfg.key_quit.clone(),
             "key_new_tab"       => cfg.key_new_tab.clone(),
             "key_close_tab"     => cfg.key_close_tab.clone(),
-            "key_switch_tab"    => cfg.key_switch_tab.clone(),
             "key_select"        => cfg.key_select.clone(),
             "key_select_all"    => cfg.key_select_all.clone(),
             _ => String::new(),
@@ -985,7 +828,6 @@ impl SettingsState {
             "opener_doc"        => cfg.opener_doc      = val.into(),
             "opener_editor"     => cfg.opener_editor   = val.into(),
             "opener_archive"    => cfg.opener_archive  = val.into(),
-            "opener_terminal"   => cfg.opener_terminal = val.into(),
             "key_copy"          => cfg.key_copy          = val.into(),
             "key_cut"           => cfg.key_cut           = val.into(),
             "key_paste"         => cfg.key_paste         = val.into(),
@@ -998,7 +840,6 @@ impl SettingsState {
             "key_quit"          => cfg.key_quit          = val.into(),
             "key_new_tab"       => cfg.key_new_tab       = val.into(),
             "key_close_tab"     => cfg.key_close_tab     = val.into(),
-            "key_switch_tab"    => cfg.key_switch_tab    = val.into(),
             "key_select"        => cfg.key_select        = val.into(),
             "key_select_all"    => cfg.key_select_all    = val.into(),
             _ => {}
@@ -1090,20 +931,13 @@ enum InputMode {
     NewDir,
     Confirm,
     Settings,
-    /// A background file operation is running — show the progress overlay.
-    Progress,
-    /// About to run a command — show the args box so the user can append
-    /// extra arguments before launching.  Holds the base command args and cwd.
-    RunArgs { args: Vec<String>, cwd: PathBuf },
-    /// Showing the help overlay (press ? to open, any key to close).
-    Help,
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 struct App {
     cfg:         Config,
     theme:       Theme,
-    icon_set:    ResolvedIconSet,
+    icon_set:    IconSet,
     tabs:        Vec<Tab>,
     tab_idx:     usize,
     yank:        Vec<PathBuf>,
@@ -1126,34 +960,20 @@ struct App {
     img_picker:   Option<Picker>,
     img_path:     Option<PathBuf>,
     img_state:    Option<StatefulProtocol>,
-    // Video thumbnail
-    thumb_src:    Option<PathBuf>,
-    thumb_tmp:    Option<PathBuf>,
-    thumb_rx:     Option<mpsc::Receiver<Option<PathBuf>>>,
-    thumb_meta:   Option<String>,
-    // User-defined themes / icons
+    // Video thumbnail preview
+    vid_thumb_path:  Option<PathBuf>,   // source video path
+    vid_thumb_file:  Option<PathBuf>,   // temp PNG on disk
+    vid_thumb_state: Option<StatefulProtocol>,
+    vid_thumb_rx:    Option<mpsc::Receiver<PathBuf>>, // signals thumb is ready
+    // User-defined themes loaded from ~/.config/fd-files/themes.json
     user_themes:  Vec<UserThemeEntry>,
-    user_icons:   Vec<UserIconEntry>,
-    // Background file-operation progress
-    progress_rx:       Option<mpsc::Receiver<ProgressUpdate>>,
-    progress_cancel:   Option<Arc<AtomicBool>>,
-    progress_label:    String,
-    progress_total:    u64,
-    progress_done:     u64,
-    progress_current:  String,
-    progress_finished: bool,
 }
 impl App {
-    fn new(start: PathBuf, mut cfg: Config) -> Self {
+    fn new(start: PathBuf, cfg: Config) -> Self {
         let sh = cfg.show_hidden;
         let user_themes = UserThemeEntry::load_all();
-        let user_icons  = UserIconEntry::load_all();
         let theme    = Theme::resolve(&cfg.theme, &user_themes);
-        let icon_set = ResolvedIconSet::resolve(&cfg.icon_set, &user_icons);
-        // Auto-detect terminal if not set in config.
-        if cfg.opener_terminal.is_empty() {
-            cfg.opener_terminal = Self::detect_terminal();
-        }
+        let icon_set = IconSet::by_name(&cfg.icon_set);
         Self {
             theme, icon_set,
             tabs: vec![Tab::new(start, sh)], tab_idx: 0,
@@ -1167,14 +987,13 @@ impl App {
             fuzzy_loading: false, fuzzy_rx: None,
             last_preview_size: (0, 0),
             img_picker: Picker::from_query_stdio().ok(),
-            img_path: None, img_state: None,
-            thumb_src: None, thumb_tmp: None,
-            thumb_rx: None, thumb_meta: None,
-            user_themes, user_icons,
-            progress_rx: None, progress_cancel: None,
-            progress_label: String::new(), progress_total: 0,
-            progress_done: 0, progress_current: String::new(),
-            progress_finished: false,
+            img_path: None,
+            img_state: None,
+            vid_thumb_path: None,
+            vid_thumb_file: None,
+            vid_thumb_state: None,
+            vid_thumb_rx: None,
+            user_themes,
         }
     }
     fn tab(&self)         -> &Tab     { &self.tabs[self.tab_idx] }
@@ -1218,34 +1037,57 @@ impl App {
                 }
             }
         }
-        // Poll thumbnail extraction result from background ffmpeg thread
-        if self.thumb_rx.is_some() {
-            let result = self.thumb_rx.as_ref().unwrap().try_recv().ok();
-            if let Some(maybe_path) = result {
-                self.thumb_rx = None;
-                if let Some(tmp) = maybe_path {
-                    self.thumb_tmp = Some(tmp.clone());
-                    if let Some(picker) = self.img_picker.as_mut() {
-                        if let Ok(img) = image::open(&tmp) {
-                            self.img_state = Some(picker.new_resize_protocol(img));
-                        }
+        // Clear image state if we've navigated away from an image
+        let is_image = self.tab().current()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map(|e| IMAGE_EXT.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if !is_image && self.img_state.is_some() {
+            self.img_path  = None;
+            self.img_state = None;
+        }
+
+        // Clear video thumbnail state if we've navigated away from a video
+        let is_video = self.tab().current()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map(|e| VIDEO_EXT.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if !is_video {
+            if self.vid_thumb_state.is_some() || self.vid_thumb_rx.is_some() {
+                // Clean up temp file
+                if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(f); }
+                self.vid_thumb_path  = None;
+                self.vid_thumb_state = None;
+                self.vid_thumb_rx    = None;
+            }
+        }
+
+        // Drain video thumbnail channel — load image once ffmpeg signals done
+        if self.vid_thumb_rx.is_some() {
+            let done = if let Some(rx) = &self.vid_thumb_rx {
+                match rx.try_recv() {
+                    Ok(thumb_path) => Some(thumb_path),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // ffmpeg failed — show nothing, clean up
+                        if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(f); }
+                        self.vid_thumb_rx = None;
+                        None
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                }
+            } else { None };
+
+            if let Some(thumb_path) = done {
+                self.vid_thumb_rx = None;
+                if let Some(picker) = self.img_picker.as_mut() {
+                    if let Ok(img) = image::open(&thumb_path) {
+                        self.vid_thumb_state = Some(picker.new_resize_protocol(img));
                     }
                 }
             }
         }
-        // Clear image state if we've navigated away from an image or video
-        let cur_ext = self.tab().current()
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
-        let is_visual = IMAGE_EXT.contains(&cur_ext.as_str()) || VIDEO_EXT.contains(&cur_ext.as_str());
-        if !is_visual && self.img_state.is_some() {
-            self.img_path  = None;
-            self.img_state = None;
-        }
-        // Drain progress messages from any running background file operation.
-        self.tick_progress();
     }
     fn yank_files(&mut self, cut: bool) {
         let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
@@ -1259,371 +1101,56 @@ impl App {
     }
     fn paste_files(&mut self) {
         if self.yank.is_empty() { self.msg("Nothing to paste", true); return; }
-        let dst      = self.tab().cwd.clone();
-        let srcs     = self.yank.clone();
-        let is_cut   = self.yank_cut;
-        let label    = if is_cut { "Moving" } else { "Copying" }.to_string();
-
-        // Calculate total bytes upfront so the progress bar has something to
-        // work with. This is a fast directory walk — done on the UI thread
-        // before spawning the worker so we can show an accurate total.
-        let total: u64 = srcs.iter().map(|p| total_size(p)).sum();
-
-        let (tx, rx)   = mpsc::channel::<ProgressUpdate>();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_clone = Arc::clone(&cancel_flag);
-
-        // Spawn the worker thread.
-        std::thread::spawn(move || {
-            let _ = tx.send(ProgressUpdate::TotalBytes(total));
-            let mut done: u64 = 0;
-            for src in &srcs {
-                if cancel_clone.load(Ordering::Relaxed) { break; }
-                let target = dst.join(src.file_name().unwrap_or_default());
-                let res: io::Result<()> = if is_cut {
-                    // Try a cheap rename first (works on same filesystem).
-                    // If the rename fails (cross-device), fall back to
-                    // copy-then-delete so large moves still show progress.
-                    fs::rename(src, &target).or_else(|_| {
-                        if src.is_dir() {
-                            copy_dir_progress(src, &target, &mut done, &tx, &cancel_clone)
-                                .and_then(|_| fs::remove_dir_all(src))
-                        } else {
-                            copy_file_progress(src, &target, &mut done, &tx, &cancel_clone)
-                                .and_then(|_| fs::remove_file(src))
-                        }
-                    })
-                } else if src.is_dir() {
-                    copy_dir_progress(src, &target, &mut done, &tx, &cancel_clone)
-                } else {
-                    copy_file_progress(src, &target, &mut done, &tx, &cancel_clone)
-                };
-                if let Err(e) = res {
-                    if e.kind() == io::ErrorKind::Interrupted { break; }
-                    let _ = tx.send(ProgressUpdate::Error(e.to_string()));
-                    return;
-                }
-            }
-            let _ = tx.send(ProgressUpdate::Done);
-        });
-
-        // Switch UI into progress mode.
-        self.progress_rx       = Some(rx);
-        self.progress_cancel   = Some(cancel_flag);
-        self.progress_label    = label;
-        self.progress_total    = total;
-        self.progress_done     = 0;
-        self.progress_current  = String::new();
-        self.progress_finished = false;
-        self.mode              = InputMode::Progress;
-
-        // If this was a cut, clear the yank register immediately.
-        if is_cut { self.yank.clear(); self.yank_cut = false; }
+        let dst = self.tab().cwd.clone(); let mut errors = vec![];
+        for src in &self.yank {
+            let target = dst.join(src.file_name().unwrap_or_default());
+            let res = if self.yank_cut {
+                fs::rename(src, &target).or_else(|_| {
+                    if src.is_dir() { copy_dir(src, &target).and_then(|_| fs::remove_dir_all(src)) }
+                    else { fs::copy(src, &target).map(|_|()).and_then(|_| fs::remove_file(src)) }
+                })
+            } else if src.is_dir() { copy_dir(src, &target) }
+            else { fs::copy(src, &target).map(|_|()) };
+            if let Err(e) = res { errors.push(e.to_string()); }
+        }
+        if self.yank_cut { self.yank.clear(); self.yank_cut = false; }
+        self.tab_mut().refresh();
+        if errors.is_empty() { self.msg("Pasted successfully", false); }
+        else { self.msg(&format!("Error: {}", errors[0]), true); }
     }
-
     fn delete_files(&mut self) {
         let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
             self.tab().selected.iter().cloned().collect()
         } else if let Some(p) = self.tab().current().cloned() { vec![p] }
         else { return; };
-
-        let (tx, rx)    = mpsc::channel::<ProgressUpdate>();
-        let cancel_flag  = Arc::new(AtomicBool::new(false));
-        let cancel_clone = Arc::clone(&cancel_flag);
-
-        std::thread::spawn(move || {
-            for path in &targets {
-                if cancel_clone.load(Ordering::Relaxed) { break; }
-                if let Err(e) = delete_path_progress(path, &tx, &cancel_clone) {
-                    if e.kind() != io::ErrorKind::Interrupted {
-                        let _ = tx.send(ProgressUpdate::Error(e.to_string()));
-                        return;
-                    }
-                    break;
-                }
-            }
-            let _ = tx.send(ProgressUpdate::Done);
-        });
-
-        self.tab_mut().selected.clear();
-        self.progress_rx       = Some(rx);
-        self.progress_cancel   = Some(cancel_flag);
-        self.progress_label    = "Deleting".to_string();
-        self.progress_total    = 0; // delete doesn't track bytes
-        self.progress_done     = 0;
-        self.progress_current  = String::new();
-        self.progress_finished = false;
-        self.mode              = InputMode::Progress;
-    }
-
-    /// Drain pending progress messages from the worker thread.
-    /// Call this from tick() every frame while in Progress mode.
-    fn tick_progress(&mut self) {
-        let rx = match &self.progress_rx { Some(r) => r, None => return };
-        // Drain up to 256 messages per frame to keep the UI responsive.
-        for _ in 0..256 {
-            match rx.try_recv() {
-                Ok(ProgressUpdate::TotalBytes(n))   => { self.progress_total   = n; }
-                Ok(ProgressUpdate::BytesDone(n))    => { self.progress_done    = n; }
-                Ok(ProgressUpdate::CurrentFile(f))  => { self.progress_current = f; }
-                Ok(ProgressUpdate::Done) => {
-                    self.progress_finished = true;
-                    self.progress_rx     = None;
-                    self.progress_cancel = None;
-                    self.mode            = InputMode::Normal;
-                    self.tab_mut().refresh();
-                    self.msg(&format!("{} complete", self.progress_label), false);
-                    break;
-                }
-                Ok(ProgressUpdate::Error(e)) => {
-                    self.progress_finished = true;
-                    self.progress_rx     = None;
-                    self.progress_cancel = None;
-                    self.mode            = InputMode::Normal;
-                    self.tab_mut().refresh();
-                    self.msg(&format!("{} error: {}", self.progress_label, e), true);
-                    break;
-                }
-                Err(mpsc::TryRecvError::Empty)        => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.progress_rx     = None;
-                    self.progress_cancel = None;
-                    self.mode            = InputMode::Normal;
-                    self.tab_mut().refresh();
-                    break;
-                }
-            }
+        let mut errors = vec![];
+        for p in &targets {
+            let res = if p.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) };
+            if let Err(e) = res { errors.push(e.to_string()); }
         }
+        self.tab_mut().selected.clear(); self.tab_mut().refresh();
+        if errors.is_empty() { self.msg(&format!("Deleted {} item(s)", targets.len()), false); }
+        else { self.msg(&format!("Error: {}", errors[0]), true); }
     }
     fn open_current(&mut self) {
         let path = match self.tab().current().cloned() { Some(p) => p, None => return };
         if path.is_dir() { self.tab_mut().enter(); return; }
-
         let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
-        let ext = ext.as_str();
-        let cfg = self.cfg.clone();
-
-        // ── Shell scripts (.sh .bash .zsh .fish) ─────────────────────────────
-        if SHELL_EXT.contains(&ext) {
-            let interpreter = match ext {
-                "bash" => "bash", "zsh" => "zsh", "fish" => "fish", _ => "sh",
-            };
-            let args = vec![interpreter.to_string(), path.to_string_lossy().into_owned()];
-            let cwd  = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-            self.input_buf.clear();
-            self.mode = InputMode::RunArgs { args, cwd };
-            return;
-        }
-
-        // ── Java archives (.jar) ──────────────────────────────────────────────
-        if JAVA_EXT.contains(&ext) {
-            let args = vec!["java".to_string(), "-jar".to_string(), path.to_string_lossy().into_owned()];
-            let cwd  = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-            self.input_buf.clear();
-            self.mode = InputMode::RunArgs { args, cwd };
-            return;
-        }
-
-        // ── Binary executables (unix +x bit, no recognised extension) ────────
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let is_exec = path.metadata()
-                .map(|m| m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
-            if is_exec && ext.is_empty() {
-                let args = vec![path.to_string_lossy().into_owned()];
-                let cwd  = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-                self.input_buf.clear();
-                self.mode = InputMode::RunArgs { args, cwd };
-                return;
-            }
-        }
-
-        // ── Everything else — delegate to the existing openers ───────────────
-        // stdout/stderr are redirected to /dev/null so GUI apps (mpv, mirage,
-        // etc.) don't spew status lines and GTK warnings into the TUI.
-        let null = || std::process::Stdio::null();
-        if IMAGE_EXT.contains(&ext) {
-            let _ = Command::new(&cfg.opener_image).arg(&path)
-                .stdout(null()).stderr(null()).spawn();
-        } else if VIDEO_EXT.contains(&ext) {
-            let _ = Command::new(&cfg.opener_video).arg(&path)
-                .stdout(null()).stderr(null()).spawn();
-        } else if AUDIO_EXT.contains(&ext) {
-            let _ = Command::new(&cfg.opener_audio).arg(&path)
-                .stdout(null()).stderr(null()).spawn();
-        } else if DOC_EXT.contains(&ext) {
-            let _ = Command::new(&cfg.opener_doc).arg(&path)
-                .stdout(null()).stderr(null()).spawn();
-        } else if ARCHIVE_EXT.contains(&ext) {
-            self.extract_archive(&path.clone());
-        } else {
-            self.nvim_path = Some(path);
-        }
-    }
-
-    /// Detect the best available terminal emulator by checking $TERM_PROGRAM,
-    /// $TERMINAL, then probing a priority list of known binaries.
-    /// Returns an empty string if we are on a TTY with no display server.
-    fn detect_terminal() -> String {
-        // Honour explicit environment overrides first.
-        for var in &["TERMINAL", "TERM_PROGRAM"] {
-            if let Ok(v) = std::env::var(var) {
-                let v = v.trim().to_string();
-                if !v.is_empty() && which(&v) { return v; }
-            }
-        }
-        // Ordered preference list — common terminals across all DEs / WMs.
-        // Wayland-native first, then X11, then universal fallbacks.
-        const CANDIDATES: &[&str] = &[
-            // Wayland-native
-            "foot", "kitty", "alacritty", "wezterm",
-            // Common across GNOME / KDE / XFCE / etc.
-            "ghostty", "rio",
-            "gnome-terminal", "kgx",            // GNOME
-            "konsole",                           // KDE
-            "xfce4-terminal",                    // XFCE
-            "lxterminal",                        // LXDE
-            "mate-terminal",                     // MATE
-            "tilix", "terminator", "termite",
-            // X11 universal fallbacks
-            "urxvt", "rxvt", "xterm", "st",
-            // Anything that speaks xterm protocol
-            "xfce4-terminal",
-        ];
-        for bin in CANDIDATES {
-            if which(bin) { return bin.to_string(); }
-        }
-        String::new() // TTY / no emulator found
-    }
-
-    /// Return the correct flag(s) that tell a terminal emulator to run a
-    /// program.  The returned vec is inserted between the terminal binary
-    /// and the program args.
-    ///
-    /// Most modern terminals use `--` but several older or DE-specific ones
-    /// use `-e` or `-x`.
-    fn terminal_exec_flags(bin: &str) -> Vec<&'static str> {
-        // Extract just the binary name in case a full path was given.
-        let name = bin.rsplit('/').next().unwrap_or(bin);
-        match name {
-            // These terminals use `-e` (execute) as their flag.
-            "gnome-terminal" | "kgx"
-            | "xfce4-terminal" | "lxterminal"
-            | "mate-terminal" | "tilix"
-            | "terminator"  | "xterm"
-            | "urxvt" | "rxvt" | "st"
-            | "sakura" | "pantheon-terminal"
-            | "terminology" | "cool-retro-term"
-                => vec!["-e"],
-
-            // konsole uses -e but needs --noclose so the window stays open.
-            "konsole" => vec!["--noclose", "-e"],
-
-            // wezterm uses a subcommand.
-            "wezterm" => vec!["start", "--"],
-
-            // Everything else (kitty, foot, alacritty, ghostty, rio, termite,
-            // wezterm-gui, …) uses the standard `--` separator.
-            _ => vec!["--"],
-        }
-    }
-
-    /// Returns true if we are running directly on a TTY with no display
-    /// server available (i.e. no WAYLAND_DISPLAY and no DISPLAY).
-    fn is_tty_only() -> bool {
-        std::env::var("WAYLAND_DISPLAY").is_err() && std::env::var("DISPLAY").is_err()
-    }
-
-    /// Spawn `args` in a terminal window, or run them directly in the
-    /// foreground if we are on a TTY.
-    fn spawn_in_terminal(&mut self, terminal_cmd: &str, args: &[&str], cwd: &Path) {
-        // ── TTY / no display server ──────────────────────────────────────────
-        // There is no terminal emulator to spawn — run the program directly
-        // in the foreground by suspending the TUI, waiting for the child to
-        // finish, then restoring the TUI.
-        if Self::is_tty_only() || terminal_cmd.is_empty() {
-            if args.is_empty() { return; }
-            // Restore the terminal to a sane state before handing it over.
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            let status = Command::new(args[0])
-                .args(&args[1..])
-                .current_dir(cwd)
-                .status();
-            // Re-enter TUI mode after the child exits.
-            let _ = enable_raw_mode();
-            let _ = execute!(io::stdout(), EnterAlternateScreen);
-            match status {
-                Ok(s)  => self.msg(&format!("Exited: {}", s), false),
-                Err(e) => self.msg(&format!("Run error: {}", e), true),
-            }
-            return;
-        }
-
-        // ── GUI terminal emulator ────────────────────────────────────────────
-        // Resolve which terminal binary to use.
-        let resolved: String;
-        let term_str: &str = if terminal_cmd.is_empty() {
-            resolved = Self::detect_terminal();
-            &resolved
-        } else {
-            terminal_cmd
-        };
-
-        // Split the configured command in case it has embedded flags,
-        // e.g. "wezterm start" or "alacritty --class=launcher".
-        let mut parts: Vec<&str> = term_str.split_whitespace().collect();
-        if parts.is_empty() {
-            self.msg("No terminal emulator found — set opener_terminal in settings", true);
-            return;
-        }
-
-        let term_bin   = parts.remove(0);
-        let exec_flags = Self::terminal_exec_flags(term_bin);
-
-        let result = Command::new(term_bin)
-            .args(&parts)        // any extra flags embedded in the config value
-            .args(&exec_flags)   // -e / -- / start -- depending on the terminal
-            .args(args)          // the program + its arguments
-            .current_dir(cwd)
-            .spawn();
-
-        match result {
-            Ok(_)  => self.msg(&format!("Running: {}", args.join(" ")), false),
-            Err(e) => {
-                // If the configured terminal failed, try auto-detection once
-                // before giving up.
-                if terminal_cmd == term_bin {
-                    let fallback = Self::detect_terminal();
-                    if !fallback.is_empty() && fallback != term_bin {
-                        let flags = Self::terminal_exec_flags(&fallback);
-                        let res2  = Command::new(&fallback)
-                            .args(&flags)
-                            .args(args)
-                            .current_dir(cwd)
-                            .spawn();
-                        if res2.is_ok() {
-                            self.msg(&format!("Running via {}: {}", fallback, args.join(" ")), false);
-                            return;
-                        }
-                    }
-                }
-                self.msg(&format!("Terminal error: {}", e), true);
-            }
-        }
+        let ext = ext.as_str(); let cfg = self.cfg.clone();
+        if IMAGE_EXT.contains(&ext)        { let _ = Command::new(&cfg.opener_image).arg(&path).spawn(); }
+        else if VIDEO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_video).arg(&path).spawn(); }
+        else if AUDIO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_audio).arg(&path).spawn(); }
+        else if DOC_EXT.contains(&ext)     { let _ = Command::new(&cfg.opener_doc).arg(&path).spawn(); }
+        else if ARCHIVE_EXT.contains(&ext) { self.extract_archive(&path.clone()); }
+        else { self.nvim_path = Some(path); }
     }
     fn extract_archive(&mut self, path: &Path) {
         let dst = path.parent().unwrap_or(Path::new("."));
         let parts: Vec<&str> = self.cfg.opener_archive.split_whitespace().collect();
-        let null = std::process::Stdio::null;
         let res = if parts.len() >= 2 {
-            Command::new(parts[0]).args(&parts[1..]).arg(path).arg("--dir").arg(dst)
-                .stdout(null()).stderr(null()).spawn()
+            Command::new(parts[0]).args(&parts[1..]).arg(path).arg("--dir").arg(dst).spawn()
         } else if which("tar") {
-            Command::new("tar").args(["xf", &path.to_string_lossy(), "-C", &dst.to_string_lossy()])
-                .stdout(null()).stderr(null()).spawn()
+            Command::new("tar").args(["xf", &path.to_string_lossy(), "-C", &dst.to_string_lossy()]).spawn()
         } else {
             Err(io::Error::new(io::ErrorKind::NotFound, "no extractor"))
         };
@@ -1640,6 +1167,47 @@ impl App {
         self.tabs.remove(self.tab_idx);
         self.tab_idx = self.tab_idx.min(self.tabs.len()-1);
     }
+    /// Spawn a background thread that runs ffmpeg to extract a thumbnail frame.
+    /// Sends the output path on the channel when done; App::tick() picks it up.
+    fn spawn_video_thumb(&mut self, video: PathBuf) {
+        // Already generating or already have thumb for this file
+        if self.vid_thumb_path.as_deref() == Some(&video) { return; }
+
+        // Clean up previous thumb file if any
+        if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(&f); }
+        self.vid_thumb_state = None;
+        self.vid_thumb_path  = Some(video.clone());
+
+        // Write thumb to a temp file
+        let tmp = env::temp_dir().join(format!(
+            "voiddream_thumb_{}.png",
+            video.file_name().and_then(|n| n.to_str()).unwrap_or("v")
+        ));
+        self.vid_thumb_file = Some(tmp.clone());
+
+        let (tx, rx) = mpsc::channel();
+        self.vid_thumb_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            // ffmpeg -y -i <video> -ss 00:00:03 -vframes 1 -vf scale=640:-1 <thumb>
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-y", "-i", &video.to_string_lossy(),
+                    "-ss", "00:00:03",
+                    "-vframes", "1",
+                    "-vf", "scale=640:-1",
+                    &tmp.to_string_lossy(),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if status.map(|s| s.success()).unwrap_or(false) && tmp.exists() {
+                let _ = tx.send(tmp);
+            }
+            // If ffmpeg fails, tx drops → Disconnected signals failure in tick()
+        });
+    }
+
     fn open_fuzzy(&mut self) {
         self.fuzzy_query.clear();
         self.fuzzy_cursor  = 0;
@@ -1735,12 +1303,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Layout: tab bar (1) | body (flex) | status (1)
+    // Layout: tab bar (1) | body (flex) | status (1) | help (1)
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(sz);
@@ -1748,15 +1317,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     draw_tab_bar(f, app, rows[0]);
     draw_body(f, app, rows[1]);
     draw_status_bar(f, app, rows[2]);
+    draw_help_bar(f, app, rows[3]);
 
     // Overlays drawn last
     match &app.mode {
         InputMode::FuzzySearch => draw_fuzzy_overlay(f, app, sz),
         InputMode::Rename(_) | InputMode::NewFile | InputMode::NewDir => draw_input_overlay(f, app, sz),
-        InputMode::Confirm   => draw_confirm_overlay(f, app, sz),
-        InputMode::Progress  => draw_progress_overlay(f, app, sz),
-        InputMode::RunArgs{..}=> draw_run_args_overlay(f, app, sz),
-        InputMode::Help      => draw_help_overlay(f, app, sz),
+        InputMode::Confirm => draw_confirm_overlay(f, app, sz),
         _ => {}
     }
 }
@@ -1766,14 +1333,14 @@ fn draw_tab_bar(f: &mut Frame, app: &App, rect: Rect) {
         let name = tab.cwd.file_name().and_then(|n| n.to_str()).unwrap_or("/");
         let label = format!(" {} {} ", i+1, name);
         if i == app.tab_idx {
-            Line::from(Span::styled(label, bold_bg(app.theme.tab_active_fg, app.theme.tab_active_bg)))
+            Line::from(Span::styled(label, bold_bg(app.theme.base, app.theme.mauve)))
         } else {
-            Line::from(Span::styled(label, st_bg(app.theme.tab_inactive_fg, app.theme.tab_inactive_bg)))
+            Line::from(Span::styled(label, st_bg(app.theme.subtext, app.theme.surface0)))
         }
     }).collect();
     let tabs = Tabs::new(titles)
         .select(app.tab_idx)
-        .style(st_bg(app.theme.tab_inactive_fg, app.theme.tab_inactive_bg))
+        .style(st_bg(app.theme.subtext, app.theme.surface0))
         .divider(Span::raw(""));
     f.render_widget(tabs, rect);
 }
@@ -1805,10 +1372,10 @@ fn draw_parent_pane(f: &mut Frame, app: &App, rect: Rect) {
     let items: Vec<ListItem> = entries.iter().take(h).map(|e| {
         let k    = file_kind(e);
         let fg   = kind_color(&k, &app.theme);
-        let ic   = &get_icon(e, &k, &app.icon_set, &app.user_icons);
+        let ic   = file_icon(e, &k, &app.icon_set);
         let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let is_cur = *e == tab.cwd;
-        let(fg, bg) = if is_cur { (app.theme.cursor_fg, app.theme.cursor_bg) } else { (fg, app.theme.panel_bg) };
+        let(fg, bg) = if is_cur { (app.theme.base, app.theme.blue) } else { (fg, app.theme.base) };
         ListItem::new(Line::from(vec![
             Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
             Span::styled(name, st_bg(fg, bg)),
@@ -1840,20 +1407,20 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         .map(|(i, e)| {
             let k    = file_kind(e);
             let fg   = kind_color(&k, &app.theme);
-            let ic   = &get_icon(e, &k, &app.icon_set, &app.user_icons);
+            let ic   = file_icon(e, &k, &app.icon_set);
             let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let size = file_size_str(e);
             let is_cur = tab.state.selected() == Some(i);
             let is_sel = tab.selected.contains(e);
-            let (fg, bg) = if is_cur { (app.theme.cursor_fg, app.theme.cursor_bg) }
-                           else if is_sel { (app.theme.selected_fg, app.theme.selected_bg) }
+            let (fg, bg) = if is_cur { (app.theme.base, app.theme.mauve) }
+                           else if is_sel { (app.theme.mauve, app.theme.surface0) }
                            else { (fg, app.theme.base) };
             let max_name = (rect.width.saturating_sub(9)) as usize;
             let name_clipped: String = name.chars().take(max_name).collect();
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
                 Span::styled(name_clipped, st_bg(fg, bg)),
-                Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.cursor_fg } else { app.theme.popup_dim_fg }, bg)),
+                Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.base } else { app.theme.overlay0 }, bg)),
             ]))
         }).collect();
 
@@ -1863,9 +1430,9 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     };
     let block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT)
-        .border_style(st(app.theme.border_fg))
-        .title(Span::styled(title, bold(app.theme.title_fg)))
-        .style(st_bg(app.theme.text, app.theme.panel_bg));
+        .border_style(st(app.theme.surface1))
+        .title(Span::styled(title, bold(app.theme.blue)))
+        .style(st_bg(app.theme.text, app.theme.base));
 
     let mut state = app.tab().state.clone();
     f.render_stateful_widget(List::new(items).block(block), rect, &mut state);
@@ -1895,11 +1462,11 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     // Header
     let header = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(format!(" {} ", &get_icon(&current, &k, &app.icon_set, &app.user_icons)), st_bg(c, app.theme.base)),
+            Span::styled(format!(" {} ", file_icon(&current, &k, &app.icon_set)), st_bg(c, app.theme.base)),
             Span::styled(name, bold_bg(c, app.theme.base)),
         ]),
         Line::from(vec![
-            Span::styled(format!("  {}   {}", file_size_str(&current), format_mtime(&current, &app.cfg.date_format)), st_bg(app.theme.popup_dim_fg, app.theme.panel_bg)),
+            Span::styled(format!("  {}   {}", file_size_str(&current), format_mtime(&current, &app.cfg.date_format)), st_bg(app.theme.overlay0, app.theme.base)),
         ]),
     ]).style(st_bg(app.theme.text, app.theme.base));
     f.render_widget(header, inner[0]);
@@ -1924,135 +1491,20 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         } else {
             let p = Paragraph::new(Span::styled(
                 "\u{f03e}  (terminal does not support graphics protocol)",
-                st_bg(app.theme.popup_dim_fg, app.theme.panel_bg),
+                st_bg(app.theme.overlay0, app.theme.base),
             ));
             f.render_widget(p, content_rect);
         }
         return;
     }
 
-    // Video preview — extract thumbnail via ffmpeg on a background thread.
-    // Re-extract if video changed OR pane width changed (better resolution fit).
-    let pane_changed = app.last_preview_size.0 != content_rect.width;
-    if VIDEO_EXT.contains(&ext.as_str()) {
-        let needs_thumb = app.thumb_src.as_deref() != Some(&current) || pane_changed;
-        if needs_thumb {
-            app.thumb_rx   = None;
-            app.thumb_meta = None;
-            if let Some(old) = app.thumb_tmp.take() { let _ = fs::remove_file(old); }
-            app.thumb_src  = Some(current.clone());
-            app.img_state  = None;
-            app.img_path   = None;
-
-            if which("ffmpeg") {
-                let tmp = std::env::temp_dir()
-                    .join(format!("fd-files-thumb-{}.jpg", std::process::id()));
-                let src  = current.clone();
-                let tmp2 = tmp.clone();
-                // Scale thumbnail to fit within the pane's pixel dimensions.
-                // Use conservative cell sizes (8×16) so it never overflows.
-                // force_original_aspect_ratio=decrease ensures it fits in the box.
-                let pw = ((content_rect.width  as u32) * 8) & !1; // round to even
-                let ph = ((content_rect.height as u32) * 16) & !1;
-                let scale = format!(
-                    "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-                    pw.max(80), ph.max(80), pw.max(80), ph.max(80)
-                );
-                let (tx, rx) = mpsc::channel();
-                app.thumb_rx = Some(rx);
-                std::thread::spawn(move || {
-                    let ok = Command::new("ffmpeg")
-                        .args(["-y", "-loglevel", "error",
-                               "-ss", "00:00:03",
-                               "-i", &src.to_string_lossy(),
-                               "-vframes", "1",
-                               "-vf", &scale,
-                               tmp2.to_str().unwrap_or("")])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-                    let _ = tx.send(if ok && tmp2.exists() { Some(tmp2) } else { None });
-                });
-            }
-
-            // Run ffprobe once and cache — do it here, not in draw loop
-            if which("ffprobe") {
-                app.thumb_meta = Command::new("ffprobe")
-                    .args(["-v", "quiet", "-print_format", "json",
-                           "-show_format", "-show_streams",
-                           &current.to_string_lossy()])
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|json| {
-                        let duration = json.split("\"duration\":").nth(1)
-                            .and_then(|s| s.split('"').nth(1)).unwrap_or("?");
-                        let codec = json.split("\"codec_name\":").nth(1)
-                            .and_then(|s| s.split('"').nth(1)).unwrap_or("?");
-                        let width = json.split("\"width\":").nth(1)
-                            .and_then(|s| s.split([',','}']).next())
-                            .map(|s| s.trim()).unwrap_or("?");
-                        let height = json.split("\"height\":").nth(1)
-                            .and_then(|s| s.split([',','}']).next())
-                            .map(|s| s.trim()).unwrap_or("?");
-                        let secs: f64 = duration.parse().unwrap_or(0.0);
-                        let dur_str = if secs > 0.0 {
-                            format!("{:02}:{:02}:{:02}",
-                                secs as u64 / 3600,
-                                (secs as u64 % 3600) / 60,
-                                secs as u64 % 60)
-                        } else { duration.to_string() };
-                        format!("  codec:    {}\n  size:     {}×{}\n  duration: {}", codec, width, height, dur_str)
-                    });
-            }
-        }
-
-        if let Some(state) = app.img_state.as_mut() {
-            // Constrain to 80% of pane width to ensure the image stays within
-            // the preview pane regardless of terminal cell pixel size.
-            let img_w = (content_rect.width * 4 / 5).max(1);
-            let pad   = content_rect.width.saturating_sub(img_w) / 2;
-            let cols  = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(pad),
-                    Constraint::Length(img_w),
-                    Constraint::Min(0),
-                ])
-                .split(content_rect);
-            StatefulImage::new().render(cols[1], f.buffer_mut(), state);
-        } else {
-            let status_line = if app.thumb_rx.is_some() {
-                "  \u{f03d}  extracting thumbnail\u{2026}"
-            } else if which("ffmpeg") {
-                "  \u{f03d}  (thumbnail unavailable)"
-            } else {
-                "  \u{f03d}  install ffmpeg for thumbnails"
-            };
-            let mut lines: Vec<Line> = vec![
-                Line::from(Span::styled(status_line, bold(app.theme.color_video))),
-                Line::from(Span::raw("")),
-            ];
-            if let Some(meta) = &app.thumb_meta {
-                lines.extend(meta.lines().map(|l|
-                    Line::from(Span::styled(l.to_string(), st(app.theme.popup_dim_fg)))
-                ));
-            } else if !which("ffprobe") {
-                lines.push(Line::from(Span::styled(
-                    "  install ffprobe for metadata",
-                    st(app.theme.popup_dim_fg),
-                )));
-            }
-            f.render_widget(Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.panel_bg)), content_rect);
-        }
-        return;
-    }
+    // Directory listing
     if current.is_dir() {
         let entries = list_dir(&current, app.cfg.show_hidden);
         let items: Vec<ListItem> = entries.iter().take(ch).map(|e| {
             let ek = file_kind(e);
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", &get_icon(e, &ek, &app.icon_set, &app.user_icons)), st(kind_color(&ek, &app.theme))),
+                Span::styled(format!(" {} ", file_icon(e, &ek, &app.icon_set)), st(kind_color(&ek, &app.theme))),
                 Span::styled(e.file_name().unwrap_or_default().to_string_lossy().to_string(), st(kind_color(&ek, &app.theme))),
             ]))
         }).collect();
@@ -2061,16 +1513,96 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         return;
     }
 
-    // Text preview
-    if let Ok(content) = fs::read_to_string(&current) {
+    // Video preview — generate thumbnail via ffmpeg in a background thread
+    if VIDEO_EXT.contains(&ext.as_str()) {
+        app.spawn_video_thumb(current.clone());
+        if let Some(state) = app.vid_thumb_state.as_mut() {
+            let shifted = Rect {
+                x: content_rect.x + 4,
+                y: content_rect.y,
+                width: content_rect.width,
+                height: content_rect.height,
+            };
+            StatefulImage::new().render(shifted, f.buffer_mut(), state);
+        } else {
+            let size_str = human_size(current.metadata().map(|m| m.len()).unwrap_or(0));
+            let generating = app.vid_thumb_rx.is_some();
+            let lines = vec![
+                Line::from(Span::styled(
+                    if generating { "  Generating thumbnail…" } else { "  (ffmpeg not available)" },
+                    st(app.theme.overlay0),
+                )),
+                Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.subtext))),
+                Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.subtext))),
+                Line::from(Span::raw("")),
+                Line::from(Span::styled(
+                    format!("  Press Enter to open with {}", app.cfg.opener_video),
+                    st(app.theme.overlay0),
+                )),
+            ];
+            let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+            f.render_widget(p, content_rect);
+        }
+        return;
+    }
+
+    // Audio — show metadata only, no preview
+    if AUDIO_EXT.contains(&ext.as_str()) {
+        let size_str = human_size(current.metadata().map(|m| m.len()).unwrap_or(0));
+        let lines = vec![
+            Line::from(Span::styled("  Audio file", bold(app.theme.subtext))),
+            Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.subtext))),
+            Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.subtext))),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(
+                format!("  Press Enter to open with {}", app.cfg.opener_audio),
+                st(app.theme.overlay0),
+            )),
+        ];
+        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        f.render_widget(p, content_rect);
+        return;
+    }
+
+    // Text preview — skip large files to avoid blocking the UI
+    const PREVIEW_SIZE_LIMIT: u64 = 512 * 1024 * 1024; // 512 MB
+    const PREVIEW_READ_BYTES: u64 = 32 * 1024;         // read at most 32 KB
+
+    let file_size = current.metadata().map(|m| m.len()).unwrap_or(0);
+
+    if file_size > PREVIEW_SIZE_LIMIT {
+        let lines = vec![
+            Line::from(Span::styled("  (large file — preview skipped)", st(app.theme.overlay0))),
+            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.subtext))),
+            Line::from(Span::styled("  Press Enter to open in your editor.", st(app.theme.overlay0))),
+        ];
+        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        f.render_widget(p, content_rect);
+        return;
+    }
+
+    use std::io::Read;
+    let preview_text = std::fs::File::open(&current).ok().and_then(|mut f| {
+        let mut buf = vec![0u8; PREVIEW_READ_BYTES as usize];
+        let n = f.read(&mut buf).ok()?;
+        buf.truncate(n);
+        if buf.contains(&0u8) { return None; }
+        String::from_utf8(buf).ok()
+    });
+
+    if let Some(content) = preview_text {
         let lines: Vec<Line> = content.lines().take(ch).map(|l| {
             let clipped: String = l.chars().take(content_rect.width as usize).collect();
-            Line::from(Span::styled(clipped, st(app.theme.popup_dim_fg)))
+            Line::from(Span::styled(clipped, st(app.theme.subtext)))
         }).collect();
         let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
         f.render_widget(p, content_rect);
     } else {
-        let p = Paragraph::new("(binary file)").style(st_bg(app.theme.popup_dim_fg, app.theme.panel_bg));
+        let lines = vec![
+            Line::from(Span::styled("  (binary file)", st(app.theme.overlay0))),
+            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.subtext))),
+        ];
+        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
         f.render_widget(p, content_rect);
     }
 }
@@ -2083,106 +1615,54 @@ fn draw_status_bar(f: &mut Frame, app: &App, rect: Rect) {
     let total = tab.visible().len();
 
     let mut spans = vec![
-        Span::styled(format!("  {}  ", cwd), bold_bg(app.theme.status_path_fg, app.theme.status_path_bg)),
+        Span::styled(format!("  {}  ", cwd), bold_bg(app.theme.base, app.theme.blue)),
     ];
     if !app.status_msg.is_empty() {
-        let (fg, bg) = if app.status_err { (app.theme.status_err_fg, app.theme.status_err_bg) } else { (app.theme.status_msg_fg, app.theme.status_msg_bg) };
+        let (fg, bg) = if app.status_err { (app.theme.base, app.theme.red) } else { (app.theme.base, app.theme.teal) };
         spans.push(Span::styled(format!("  {}  ", app.status_msg), bold_bg(fg, bg)));
     }
     if !app.yank.is_empty() {
-        spans.push(Span::styled(format!("  \u{f0c5} {}  ", app.yank.len()), bold_bg(app.theme.status_yank_fg, app.theme.status_yank_bg)));
+        spans.push(Span::styled(format!("  \u{f0c5} {}  ", app.yank.len()), bold_bg(app.theme.base, app.theme.yellow)));
     }
     if !tab.selected.is_empty() {
-        spans.push(Span::styled(format!("  \u{f14a} {}  ", tab.selected.len()), bold_bg(app.theme.status_sel_fg, app.theme.status_sel_bg)));
+        spans.push(Span::styled(format!("  \u{f14a} {}  ", tab.selected.len()), bold_bg(app.theme.base, app.theme.mauve)));
     }
-    // Right-align: ? hint then count
-    let hint_str = " ?:help ";
+    // Right-align count
     let count_str = format!("  {}/{}", cur, total);
     let used: usize = spans.iter().map(|s| s.content.len()).sum();
-    let right_len = hint_str.len() + count_str.len();
-    let pad = (rect.width as usize).saturating_sub(used + right_len);
-    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.status_bar_fg, app.theme.status_bar_bg)));
-    spans.push(Span::styled(hint_str, bold_bg(app.theme.status_hint_fg, app.theme.status_bar_bg)));
-    spans.push(Span::styled(count_str, st_bg(app.theme.status_bar_fg, app.theme.status_bar_bg)));
+    let pad = (rect.width as usize).saturating_sub(used + count_str.len());
+    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.subtext, app.theme.surface0)));
+    spans.push(Span::styled(count_str, st_bg(app.theme.subtext, app.theme.surface0)));
 
-    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.status_bar_fg, app.theme.status_bar_bg));
+    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.subtext, app.theme.surface0));
     f.render_widget(bar, rect);
 }
 
-fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
-    let c = &app.cfg;
-    let pairs: &[(&str, &str)] = &[
-        ("↕ / ↔",              "navigate / enter dir"),
-        ("BS",                  "go up"),
-        ("↩",                   "open file"),
-        (&c.key_select,         "select"),
-        (&c.key_select_all,     "select all"),
-        (&c.key_copy,           "copy selected"),
-        (&c.key_cut,            "cut selected"),
-        (&c.key_paste,          "paste"),
-        (&c.key_delete,         "delete selected"),
-        (&c.key_rename,         "rename"),
-        (&c.key_new_file,       "new file"),
-        (&c.key_new_dir,        "new directory"),
-        (&c.key_search,         "fuzzy search"),
-        (&c.key_toggle_hidden,  "toggle hidden files"),
-        (&c.key_new_tab,        "new tab"),
-        (&c.key_close_tab,      "close tab"),
-        (&c.key_switch_tab,     "switch tab"),
-        (&c.key_quit,           "quit"),
-        (":",                   "settings"),
-        ("?",                   "this help"),
+fn draw_help_bar(f: &mut Frame, app: &App, rect: Rect) {
+    let items = [
+        ("\u{2195}","nav"), ("BS","up"), ("\u{23ce}","open"),
+        ("Spc","sel"), ("c","copy"), ("u","cut"), ("p","paste"),
+        ("d","del"), ("r","ren"), ("f","file"), ("m","dir"),
+        ("/","find"), ("t","tab+"), ("x","tab-"), ("Tab","tabs"),
     ];
-
-    let w = (rect.width * 2 / 3).max(52).min(rect.width.saturating_sub(4));
-    let h = (pairs.len() as u16 + 4).min(rect.height.saturating_sub(2));
-    let x = (rect.width  - w) / 2;
-    let y = (rect.height - h) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
-        .title(Span::styled("  ? Help  — any key to close  ", bold(app.theme.popup_border_fg)))
-        .style(st_bg(app.theme.popup_text_fg, app.theme.popup_bg));
-    f.render_widget(block, popup);
-
-    let inner = Rect {
-        x: popup.x + 2, y: popup.y + 1,
-        width: popup.width.saturating_sub(4),
-        height: popup.height.saturating_sub(2),
-    };
-
-    let col_w = (inner.width / 2) as usize;
-    let rows_available = inner.height as usize;
-    let lines: Vec<Line> = pairs.iter().take(rows_available).map(|(key, desc)| {
-        let key_col  = format!("{:<12}", key);
-        let desc_col = format!("{}", desc);
-        // Truncate if needed
-        let total = col_w.saturating_sub(1);
-        let desc_trunc = if desc_col.len() > total { &desc_col[..total] } else { &desc_col };
-        Line::from(vec![
-            Span::styled(key_col,  bold(app.theme.popup_border_fg)),
-            Span::styled(format!(" {}", desc_trunc), st(app.theme.popup_text_fg)),
-        ])
-    }).collect();
-
-    f.render_widget(
-        Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base)),
-        inner,
-    );
+    let mut spans = vec![];
+    for (key, action) in &items {
+        spans.push(Span::styled(format!(" {}", key), bold(app.theme.mauve)));
+        spans.push(Span::styled(format!(":{} ", action), st(app.theme.overlay0)));
+    }
+    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.overlay0, app.theme.base));
+    f.render_widget(bar, rect);
 }
 
 fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
+        .border_style(bold(app.theme.mauve))
         .title(Span::styled(
             "  \u{f013} Settings  [\u{2190}\u{2192} sections  \u{2191}\u{2193} navigate  Enter edit  S save  Esc close]  ",
-            bold_bg(app.theme.tab_inactive_fg, app.theme.panel_bg),
+            bold_bg(app.theme.subtext, app.theme.base),
         ))
-        .style(st_bg(app.theme.text, app.theme.panel_bg));
+        .style(st_bg(app.theme.text, app.theme.base));
     f.render_widget(block, rect);
 
     let inner = Layout::default()
@@ -2200,15 +1680,15 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     ];
     let titles: Vec<Line> = sections.iter().map(|(sec, label)| {
         let s = format!("  {}  ", label);
-        if *sec == app.settings.section { Line::from(Span::styled(s, bold_bg(app.theme.settings_cursor_fg, app.theme.settings_cursor_bg))) }
-        else { Line::from(Span::styled(s, st_bg(app.theme.tab_inactive_fg, app.theme.tab_inactive_bg))) }
+        if *sec == app.settings.section { Line::from(Span::styled(s, bold_bg(app.theme.base, app.theme.mauve))) }
+        else { Line::from(Span::styled(s, st_bg(app.theme.subtext, app.theme.surface0))) }
     }).collect();
     let tabs = Tabs::new(titles)
         .select(match app.settings.section {
             SettingsSection::Behaviour  => 0, SettingsSection::Appearance => 1,
             SettingsSection::Openers    => 2, SettingsSection::Keybinds   => 3,
         })
-        .style(st_bg(app.theme.tab_inactive_fg, app.theme.tab_inactive_bg))
+        .style(st_bg(app.theme.subtext, app.theme.surface0))
         .divider(Span::raw(""));
     f.render_widget(tabs, inner[0]);
 
@@ -2220,8 +1700,8 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         let val_display = if app.settings.editing && is_cur {
             format!("{}\u{2588}", app.settings.edit_buf)
         } else { val };
-        let (lbg, vbg) = if is_cur { (app.theme.surface0, app.theme.border_fg) } else { (app.theme.panel_bg, app.theme.panel_bg) };
-        let (lfg, vfg) = if is_cur { (app.theme.settings_cursor_fg, app.theme.settings_cursor_bg) } else { (app.theme.settings_key_fg, app.theme.settings_val_fg) };
+        let (lbg, vbg) = if is_cur { (app.theme.surface0, app.theme.surface1) } else { (app.theme.base, app.theme.base) };
+        let (lfg, vfg) = if is_cur { (app.theme.text, app.theme.mauve) } else { (app.theme.subtext, app.theme.text) };
         ListItem::new(Line::from(vec![
             Span::styled(format!("  {:30}", label), st_bg(lfg, lbg)),
             Span::styled(format!("  {}  ", val_display), st_bg(vfg, vbg)),
@@ -2235,7 +1715,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     // Unsaved indicator
     if app.settings.dirty && !app.settings.dropdown {
         let hint = Paragraph::new("  Unsaved changes — press S to save")
-            .style(st_bg(app.theme.warn_fg, app.theme.warn_bg));
+            .style(st_bg(app.theme.base, app.theme.yellow));
         f.render_widget(hint, inner[2]);
     }
 
@@ -2243,7 +1723,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     if app.settings.dropdown {
         let items  = SettingsState::section_items(&app.settings.section);
         let (k, _) = items[app.settings.cursor];
-        let opts   = SettingsState::dropdown_options(k, &app.user_themes, &app.user_icons).unwrap_or_default();
+        let opts   = SettingsState::dropdown_options(k, &app.user_themes).unwrap_or_default();
 
         let dw = 36u16;
         let dh = (opts.len() as u16 + 2).min(rect.height - 4);
@@ -2259,9 +1739,9 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         let dd_items: Vec<ListItem> = opts.iter().enumerate().map(|(i, opt)| {
             let is_cur = i == app.settings.dd_cursor;
             let (fg, bg) = if is_cur {
-                (app.theme.settings_cursor_fg, app.theme.settings_cursor_bg)
+                (app.theme.base, app.theme.mauve)
             } else {
-                (app.theme.popup_text_fg, app.theme.popup_bg)
+                (app.theme.text, app.theme.surface1)
             };
             ListItem::new(Line::from(vec![
                 Span::styled(if is_cur { " \u{f0da} " } else { "   " }, st_bg(fg, bg)),
@@ -2271,9 +1751,9 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
 
         let dd_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(bold(app.theme.popup_border_fg))
-            .title(Span::styled(" \u{2191}\u{2193} select  Enter confirm  Esc cancel ", st(app.theme.popup_dim_fg)))
-            .style(st_bg(app.theme.popup_text_fg, app.theme.popup_bg));
+            .border_style(bold(app.theme.mauve))
+            .title(Span::styled(" \u{2191}\u{2193} select  Enter confirm  Esc cancel ", st(app.theme.overlay0)))
+            .style(st_bg(app.theme.text, app.theme.surface1));
 
         let mut dd_state = ListState::default();
         dd_state.select(Some(app.settings.dd_cursor));
@@ -2300,73 +1780,11 @@ fn draw_input_overlay(f: &mut Frame, app: &App, rect: Rect) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
-        .style(st_bg(app.theme.popup_text_fg, app.theme.popup_bg));
+        .border_style(bold(app.theme.mauve))
+        .style(st_bg(app.theme.text, app.theme.base));
     let text = format!(" {}: {}\u{2588}", prompt, app.input_buf);
     let p = Paragraph::new(text).block(block).style(bold(app.theme.text));
     f.render_widget(p, popup);
-}
-
-fn draw_run_args_overlay(f: &mut Frame, app: &App, rect: Rect) {
-    let base_cmd = match &app.mode {
-        InputMode::RunArgs { args, .. } => args.join(" "),
-        _ => return,
-    };
-
-    let w = (rect.width * 2 / 3).max(50).min(rect.width.saturating_sub(4));
-    let h = 5u16;
-    let x = (rect.width  - w) / 2;
-    let y = (rect.height - h) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
-        .title(Span::styled("  \u{f489} Run  ", bold(app.theme.popup_border_fg)))
-        .style(st_bg(app.theme.popup_text_fg, app.theme.popup_bg));
-    f.render_widget(block, popup);
-
-    let inner = Rect {
-        x: popup.x + 1, y: popup.y + 1,
-        width: popup.width.saturating_sub(2),
-        height: popup.height.saturating_sub(2),
-    };
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // prefix input line
-            Constraint::Length(1), // base command (greyed, not editable)
-            Constraint::Length(1), // hint
-        ])
-        .split(inner);
-
-    // Top row: what the user types — goes BEFORE the command
-    // Empty = run as-is.  "mangohud" = mangohud ./game
-    let prefix_display = format!(" {}\u{2588}", app.input_buf);
-    f.render_widget(
-        Paragraph::new(prefix_display).style(bold(app.theme.popup_text_fg)),
-        rows[0],
-    );
-
-    // Middle row: the fixed base command, dimmed
-    let max_base = inner.width.saturating_sub(2) as usize;
-    let base_display = if base_cmd.len() > max_base {
-        format!(" …{}", &base_cmd[base_cmd.len() - max_base..])
-    } else {
-        format!(" {}", base_cmd)
-    };
-    f.render_widget(
-        Paragraph::new(base_display).style(st(app.theme.popup_dim_fg)),
-        rows[1],
-    );
-
-    // Hint
-    f.render_widget(
-        Paragraph::new("  Enter — run    Esc — cancel  ").style(st(app.theme.popup_dim_fg)),
-        rows[2],
-    );
 }
 
 fn draw_confirm_overlay(f: &mut Frame, app: &App, rect: Rect) {
@@ -2377,110 +1795,8 @@ fn draw_confirm_overlay(f: &mut Frame, app: &App, rect: Rect) {
     let y = rect.height / 2;
     let popup = Rect { x, y, width: w, height: h };
     f.render_widget(Clear, popup);
-    let p = Paragraph::new(msg).style(bold_bg(app.theme.status_err_fg, app.theme.status_err_bg));
+    let p = Paragraph::new(msg).style(bold_bg(app.theme.base, app.theme.red));
     f.render_widget(p, popup);
-}
-
-fn draw_progress_overlay(f: &mut Frame, app: &App, rect: Rect) {
-    // ── Popup dimensions ─────────────────────────────────────────────────────
-    let w  = (rect.width * 3 / 4).max(50).min(rect.width.saturating_sub(4));
-    let h  = 7u16;
-    let x  = (rect.width  - w) / 2;
-    let y  = (rect.height - h) / 2;
-    let popup = Rect { x, y, width: w, height: h };
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
-        .title(Span::styled(
-            format!("  {}…  ", app.progress_label),
-            bold(app.theme.popup_border_fg),
-        ));
-    f.render_widget(block, popup);
-
-    // Inner area (inside the border)
-    let inner = Rect {
-        x: popup.x + 1, y: popup.y + 1,
-        width: popup.width.saturating_sub(2),
-        height: popup.height.saturating_sub(2),
-    };
-    let bar_width = inner.width.saturating_sub(2) as u64;
-
-    // ── Progress bar ─────────────────────────────────────────────────────────
-    let (filled, pct_str) = if app.progress_total > 0 {
-        let ratio   = (app.progress_done as f64 / app.progress_total as f64).min(1.0);
-        let filled  = (ratio * bar_width as f64) as u64;
-        let pct     = (ratio * 100.0) as u32;
-        (filled, format!(" {}% ", pct))
-    } else {
-        // Delete operations have no byte total — show a spinner-style fill
-        // that grows while the operation runs.
-        (bar_width / 2, " … ".to_string())
-    };
-
-    let bar_line = Line::from(vec![
-        Span::styled("[",                                st(app.theme.popup_dim_fg)),
-        Span::styled("█".repeat(filled as usize),       bold(app.theme.progress_filled_fg)),
-        Span::styled("░".repeat((bar_width - filled) as usize), st(app.theme.progress_empty_fg)),
-        Span::styled("]",                                st(app.theme.popup_dim_fg)),
-    ]);
-
-    // ── Size counters ─────────────────────────────────────────────────────────
-    let size_str = if app.progress_total > 0 {
-        format!(
-            "  {}  /  {}  {}",
-            human_size(app.progress_done),
-            human_size(app.progress_total),
-            pct_str,
-        )
-    } else {
-        format!("  {}  deleted", human_size(app.progress_done))
-    };
-
-    // ── Current filename ──────────────────────────────────────────────────────
-    let max_name = inner.width.saturating_sub(4) as usize;
-    let name_str = if app.progress_current.len() > max_name {
-        format!("  …{}", &app.progress_current[app.progress_current.len() - max_name..])
-    } else {
-        format!("  {}", app.progress_current)
-    };
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // bar
-            Constraint::Length(1), // size
-            Constraint::Length(1), // filename
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    f.render_widget(
-        Paragraph::new(bar_line),
-        rows[0],
-    );
-    f.render_widget(
-        Paragraph::new(size_str).style(st(app.theme.popup_text_fg)),
-        rows[1],
-    );
-    f.render_widget(
-        Paragraph::new(name_str).style(st(app.theme.popup_dim_fg)),
-        rows[2],
-    );
-
-    // Hint at the bottom of the popup
-    let hint = "  Esc — cancel  ";
-    let hint_rect = Rect {
-        x: popup.x + popup.width.saturating_sub(hint.len() as u16 + 1),
-        y: popup.y + popup.height - 1,
-        width: hint.len() as u16,
-        height: 1,
-    };
-    f.render_widget(
-        Paragraph::new(hint).style(st(app.theme.popup_dim_fg)),
-        hint_rect,
-    );
 }
 
 fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
@@ -2498,10 +1814,10 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
 
     let search_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.popup_border_fg))
+        .border_style(bold(app.theme.mauve))
         .title(Span::styled(
             "  \u{f422} Fuzzy Find  [Esc cancel  \u{2191}\u{2193} navigate  Enter jump]  ",
-            bold(app.theme.tab_inactive_fg),
+            bold(app.theme.subtext),
         ))
         .style(st_bg(app.theme.text, app.theme.base));
 
@@ -2512,10 +1828,10 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
         format!("  {} matches", app.fuzzy_results.len())
     };
     let search_text = Line::from(vec![
-        Span::styled("  ", st(app.theme.popup_dim_fg)),
+        Span::styled("  ", st(app.theme.overlay0)),
         Span::styled(&app.fuzzy_query, bold(app.theme.text)),
-        Span::styled("\u{2588}", bold(app.theme.popup_border_fg)),
-        Span::styled(&count_str, st(app.theme.popup_dim_fg)),
+        Span::styled("\u{2588}", bold(app.theme.mauve)),
+        Span::styled(&count_str, st(app.theme.overlay0)),
     ]);
     f.render_widget(Paragraph::new(search_text).block(search_block), inner[0]);
 
@@ -2530,17 +1846,17 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
         .map(|(i, path)| {
             let k    = file_kind(path);
             let c    = kind_color(&k, &app.theme);
-            let ic   = &get_icon(path, &k, &app.icon_set, &app.user_icons);
+            let ic   = file_icon(path, &k, &app.icon_set);
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let rel  = path.strip_prefix(&app.tab().cwd)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
             let is_cur = i == cursor;  // i is the absolute index, cursor is absolute — correct
-            let ns = if is_cur { bold_bg(app.theme.cursor_fg, app.theme.cursor_bg) } else { st(c) };
-            let ps = if is_cur { st_bg(app.theme.popup_dim_fg, app.theme.cursor_bg) } else { st(app.theme.popup_dim_fg) };
+            let ns = if is_cur { bold_bg(app.theme.base, app.theme.mauve) } else { st(c) };
+            let ps = if is_cur { st_bg(app.theme.overlay0, app.theme.mauve) } else { st(app.theme.overlay0) };
             let prefix = if is_cur { " \u{f0da} " } else { "   " };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, if is_cur { bold(app.theme.popup_border_fg) } else { st(app.theme.border_fg) }),
+                Span::styled(prefix, if is_cur { bold(app.theme.mauve) } else { st(app.theme.surface1) }),
                 Span::styled(format!("{} ", ic), ns),
                 Span::styled(name, ns),
                 Span::styled(format!("  {}", rel), ps),
@@ -2549,8 +1865,8 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
 
     let list_block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_style(st(app.theme.border_fg))
-        .style(st_bg(app.theme.text, app.theme.panel_bg));
+        .border_style(st(app.theme.surface1))
+        .style(st_bg(app.theme.text, app.theme.base));
     f.render_widget(List::new(items).block(list_block), inner[1]);
 }
 
@@ -2568,55 +1884,7 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             if matches!(key, KeyCode::Char('y')|KeyCode::Char('Y')) { app.delete_files(); }
             return false;
         }
-        InputMode::Help => {
-            app.mode = InputMode::Normal;
-            return false;
-        }
-        InputMode::Progress => {
-            // Esc cancels the running operation.
-            if key == KeyCode::Esc {
-                if let Some(flag) = &app.progress_cancel {
-                    flag.store(true, Ordering::Relaxed);
-                }
-                app.msg("Cancelling…", false);
-            }
-            return false;
-        }
-        InputMode::RunArgs { .. } => {
-            match key {
-                KeyCode::Esc => {
-                    app.mode = InputMode::Normal;
-                    app.input_buf.clear();
-                }
-                KeyCode::Enter => {
-                    let (base_args, cwd) = match mem::replace(&mut app.mode, InputMode::Normal) {
-                        InputMode::RunArgs { args, cwd } => (args, cwd),
-                        _ => unreachable!(),
-                    };
-                    let prefix = app.input_buf.trim().to_string();
-                    app.input_buf.clear();
-                    // Build final argv: prefix tokens (if any) then base args.
-                    // e.g. prefix="mangohud" + base=["./game"] → ["mangohud","./game"]
-                    let final_args: Vec<String> = if prefix.is_empty() {
-                        base_args
-                    } else {
-                        let mut v: Vec<String> = prefix.split_whitespace().map(|s| s.to_string()).collect();
-                        v.extend(base_args);
-                        v
-                    };
-                    let term = app.cfg.opener_terminal.clone();
-                    let arg_refs: Vec<&str> = final_args.iter().map(|s| s.as_str()).collect();
-                    app.spawn_in_terminal(&term, &arg_refs, &cwd);
-                }
-                KeyCode::Backspace => { app.input_buf.pop(); }
-                KeyCode::Char(c)   => app.input_buf.push(c),
-                _ => {}
-            }
-            return false;
-        }
     }
-    // Clone the keys we need to avoid borrow issues
-    let cfg = app.cfg.clone();
     match key {
         KeyCode::Up        => app.tab_mut().move_cursor(-1),
         KeyCode::Down      => app.tab_mut().move_cursor(1),
@@ -2626,81 +1894,47 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         KeyCode::PageDown  => app.tab_mut().move_cursor(10),
         KeyCode::Home      => { app.tab_mut().state.select(Some(0)); }
         KeyCode::End       => { let n=app.tab().visible().len(); if n>0 { app.tab_mut().state.select(Some(n-1)); } }
-        KeyCode::Esc       => return true,
-        _ => {
-            // ── Configurable keybinds ────────────────────────────────────────
-            if key_matches(key, mods, &cfg.key_quit) {
-                return true;
-            } else if key_matches(key, mods, &cfg.key_switch_tab) {
-                app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
-            } else if key_matches(key, mods, &cfg.key_select) {
-                app.tab_mut().toggle_select();
-            } else if key_matches(key, mods, &cfg.key_select_all) {
-                app.tab_mut().select_all();
-            } else if key == KeyCode::Char('r') && mods.contains(KeyModifiers::CONTROL) {
-                app.tab_mut().deselect_all();
-            } else if key_matches(key, mods, &cfg.key_copy) {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-                else { app.yank_files(false); }
-            } else if key_matches(key, mods, &cfg.key_cut) {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-                else { app.yank_files(true); }
-            } else if key_matches(key, mods, &cfg.key_paste) {
-                app.paste_files();
-            } else if key_matches(key, mods, &cfg.key_delete) {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-                else { app.mode = InputMode::Confirm; }
-            } else if key_matches(key, mods, &cfg.key_rename) {
-                if let Some(p) = app.tab().current().cloned() {
-                    let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
-                    app.input_buf = name.clone(); app.mode = InputMode::Rename(name);
-                }
-            } else if key_matches(key, mods, &cfg.key_new_file) {
-                app.input_buf.clear(); app.mode = InputMode::NewFile;
-            } else if key_matches(key, mods, &cfg.key_new_dir) {
-                app.input_buf.clear(); app.mode = InputMode::NewDir;
-            } else if key_matches(key, mods, &cfg.key_search) {
-                app.open_fuzzy();
-            } else if key_matches(key, mods, &cfg.key_toggle_hidden) {
-                let h = !app.tab().show_hidden;
-                app.tab_mut().show_hidden = h; app.tab_mut().refresh();
-                app.msg(if h {"Hidden files shown"} else {"Hidden files hidden"}, false);
-            } else if key_matches(key, mods, &cfg.key_new_tab) {
-                app.new_tab();
-            } else if key_matches(key, mods, &cfg.key_close_tab) {
-                app.close_tab();
-            } else if key == KeyCode::Char(':') {
-                app.mode = InputMode::Settings;
-            } else if key == KeyCode::Char('?') {
-                app.mode = InputMode::Help;
+        KeyCode::Char(' ') => app.tab_mut().toggle_select(),
+        KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().select_all(),
+        KeyCode::Char('A') => app.tab_mut().select_all(),
+        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().deselect_all(),
+        KeyCode::Char('c') => {
+            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+            else { app.yank_files(false); }
+        }
+        KeyCode::Char('u') => {
+            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+            else { app.yank_files(true); }
+        }
+        KeyCode::Char('p') => app.paste_files(),
+        KeyCode::Char('d') => {
+            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+            else { app.mode = InputMode::Confirm; }
+        }
+        KeyCode::Char('r') => {
+            if let Some(p) = app.tab().current().cloned() {
+                let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
+                app.input_buf = name.clone(); app.mode = InputMode::Rename(name);
             }
         }
+        KeyCode::Char('f') => { app.input_buf.clear(); app.mode = InputMode::NewFile; }
+        KeyCode::Char('m') => { app.input_buf.clear(); app.mode = InputMode::NewDir; }
+        KeyCode::Char('/') => app.open_fuzzy(),
+        KeyCode::Char('.') => {
+            let h = !app.tab().show_hidden;
+            app.tab_mut().show_hidden = h; app.tab_mut().refresh();
+            app.msg(if h {"Hidden files shown"} else {"Hidden files hidden"}, false);
+        }
+        KeyCode::Char('t') => app.new_tab(),
+        KeyCode::Char('x') => app.close_tab(),
+        KeyCode::Tab => {
+            app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
+        }
+        KeyCode::Char(':') => { app.mode = InputMode::Settings; }
+        KeyCode::Esc | KeyCode::Char('q') => return true,
+        _ => {}
     }
     false
-}
-
-/// Called whenever any setting is changed — applies everything that can take
-/// effect immediately without a restart.
-fn apply_settings_live(app: &mut App) {
-    // Theme and icon set
-    app.theme    = Theme::resolve(&app.cfg.theme, &app.user_themes);
-    app.icon_set = ResolvedIconSet::resolve(&app.cfg.icon_set, &app.user_icons);
-
-    // show_hidden — apply to every open tab
-    let sh = app.cfg.show_hidden;
-    for tab in &mut app.tabs {
-        tab.show_hidden = sh;
-        tab.refresh();
-    }
-
-    // col_parent / col_files — used directly from cfg at draw time, nothing to do.
-    // date_format            — used directly from cfg at draw time, nothing to do.
-    // opener_* / key_*       — used directly from cfg at call time, nothing to do.
-
-    // If opener_terminal was cleared, re-detect.
-    if app.cfg.opener_terminal.is_empty() {
-        app.cfg.opener_terminal = App::detect_terminal();
-    }
 }
 
 fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool {
@@ -2708,7 +1942,7 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
     if app.settings.dropdown {
         let items  = SettingsState::section_items(&app.settings.section);
         let (k, _) = items[app.settings.cursor];
-        let opts   = SettingsState::dropdown_options(k, &app.user_themes, &app.user_icons).unwrap_or_default();
+        let opts   = SettingsState::dropdown_options(k, &app.user_themes).unwrap_or_default();
         match key {
             KeyCode::Esc => { app.settings.dropdown = false; }
             KeyCode::Up  => { if app.settings.dd_cursor > 0 { app.settings.dd_cursor -= 1; } }
@@ -2718,7 +1952,9 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
                 SettingsState::set_value(k, &chosen, &mut app.cfg);
                 app.settings.dropdown = false;
                 app.settings.dirty    = true;
-                apply_settings_live(app);
+                // Apply theme/icon live immediately
+                app.theme    = Theme::resolve(&app.cfg.theme, &app.user_themes);
+                app.icon_set = IconSet::by_name(&app.cfg.icon_set);
             }
             _ => {}
         }
@@ -2734,8 +1970,6 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
                 let (k,_) = items[app.settings.cursor]; let v = app.settings.edit_buf.clone();
                 SettingsState::set_value(k, &v, &mut app.cfg);
                 app.settings.editing=false; app.settings.edit_buf=String::new(); app.settings.dirty=true;
-                // Apply changes that take effect immediately without a restart.
-                apply_settings_live(app);
             }
             KeyCode::Backspace => { app.settings.edit_buf.pop(); }
             KeyCode::Char(c)   => { app.settings.edit_buf.push(c); }
@@ -2767,10 +2001,10 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
         KeyCode::Enter => {
             let items = SettingsState::section_items(&app.settings.section);
             let (k, _) = items[app.settings.cursor];
-            if SettingsState::dropdown_options(k, &app.user_themes, &app.user_icons).is_some() {
+            if SettingsState::dropdown_options(k, &app.user_themes).is_some() {
                 // Open dropdown — pre-select current value
                 let cur_val = SettingsState::get_value(k, &app.cfg);
-                let opts    = SettingsState::dropdown_options(k, &app.user_themes, &app.user_icons).unwrap();
+                let opts    = SettingsState::dropdown_options(k, &app.user_themes).unwrap();
                 app.settings.dd_cursor = opts.iter().position(|o| o == &cur_val).unwrap_or(0);
                 app.settings.dropdown  = true;
             } else {
@@ -2782,10 +2016,10 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
             match app.cfg.save() {
                 Ok(_)  => {
                     app.settings.dirty = false;
-                    // Reload user themes and icon sets in case files were edited externally
+                    // Reload user themes in case themes.json was edited externally
                     app.user_themes = UserThemeEntry::load_all();
-                    app.user_icons  = UserIconEntry::load_all();
-                    apply_settings_live(app);
+                    app.theme    = Theme::resolve(&app.cfg.theme, &app.user_themes);
+                    app.icon_set = IconSet::by_name(&app.cfg.icon_set);
                     app.msg("Settings saved", false);
                 }
                 Err(e) => { app.msg(&format!("Save error: {}",e),true); }
@@ -2840,6 +2074,14 @@ fn handle_input_key(app: &mut App, key: KeyCode) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 fn main() -> Result<()> {
+    // ── Auto-create data directories on first run ──────────────────────────
+    if let Some(home) = std::env::var_os("HOME") {
+        let base = PathBuf::from(&home).join(".local").join("share").join("VoidDream");
+        let _ = fs::create_dir_all(base.join("themes"));
+        let _ = fs::create_dir_all(base.join("icons"));
+        let _ = fs::create_dir_all(PathBuf::from(&home).join(".config").join("VoidDream"));
+    }
+
     let cfg   = Config::load();
     let start = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(dirs_home);
     let start = if start.is_dir() { start } else { start.parent().map(|p| p.to_path_buf()).unwrap_or_else(dirs_home) };
@@ -2877,7 +2119,5 @@ fn main() -> Result<()> {
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()?;
-    // Clean up any video thumbnail temp file
-    if let Some(tmp) = app.thumb_tmp.take() { let _ = fs::remove_file(tmp); }
     Ok(())
 }
