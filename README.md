@@ -23,9 +23,8 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 
 <div align="center">
 
-<img src="Previews/2026-03-10-145022_hyprshot.png" width="49%"/> <img src="Previews/2026-03-10-145035_hyprshot.png" width="49%"/>
-<img src="Previews/2026-03-10-145054_hyprshot.png" width="49%"/> <img src="Previews/2026-03-10-145154_hyprshot.png" width="49%"/>
-<img src="Previews/2026-03-10-145208_hyprshot.png" width="99%"/>
+<img src="Previews/2026-03-12-220027_hyprshot.png" width="49%"/> <img src="Previews/2026-03-12-220040_hyprshot.png" width="49%"/>
+<img src="Previews/2026-03-12-220053_hyprshot.png" width="49%"/> <img src="Previews/2026-03-12-220059_hyprshot.png" width="49%"/>
 
 </div>
 
@@ -190,11 +189,10 @@ VoidDream/
 │   ├── build-packages.sh
 │   └── build-rpm.sh
 ├── Previews/
-│   ├── 2026-03-10-145022_hyprshot.png
-│   ├── 2026-03-10-145035_hyprshot.png
-│   ├── 2026-03-10-145054_hyprshot.png
-│   ├── 2026-03-10-145154_hyprshot.png
-│   └── 2026-03-10-145208_hyprshot.png
+│   ├── 2026-03-12-220027_hyprshot.png
+│   ├── 2026-03-12-220040_hyprshot.png
+│   ├── 2026-03-12-220053_hyprshot.png
+│   └── 2026-03-12-220059_hyprshot.png
 ├── themes/
 │   ├── ayu-dark.json
 │   ├── btop-dark.json
