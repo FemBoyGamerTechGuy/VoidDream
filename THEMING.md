@@ -126,77 +126,106 @@ VoidDream ships four built-in icon sets selectable from Settings:
 
 #### NerdFont — file kinds
 
-| Kind      | Glyph | Codepoint  |
-|-----------|-------|------------|
-| Directory | `󰉋`   | `U+F024B`  |
-| Symlink   | ``   | `U+F0C1`   |
-| Image     | ``   | `U+F03E`   |
-| Video     | ``   | `U+F03D`   |
-| Audio     | ``   | `U+F001`   |
-| Archive   | ``   | `U+F410`   |
-| PDF       | ``   | `U+F1C1`   |
-| Word doc  | ``   | `U+F1C2`   |
-| Spreadsheet | `` | `U+F1C3`  |
-| Rust      | ``   | `U+E7A8`   |
-| Python    | ``   | `U+E606`   |
-| JavaScript| ``   | `U+E74E`   |
-| Shell     | ``   | `U+F489`   |
-| Markdown  | ``   | `U+F48A`   |
-| Config    | ``   | `U+F013`   |
-| Lock file | ``   | `U+F023`   |
-| Generic   | ``   | `U+F15B`   |
+| Kind        | Glyph | Codepoint  |
+|-------------|-------|------------|
+| Directory   | ``   | `U+0F07B`  |
+| Symlink     | ``   | `U+0F0C1`   |
+| Image       | ``   | `U+0F03E`   |
+| Video       | ``   | `U+0F03D`   |
+| Audio       | ``   | `U+0F001`   |
+| Archive     | ``   | `U+0F410`   |
+| PDF         | ``   | `U+0F1C1`   |
+| Word doc    | ``   | `U+0F1C2`   |
+| Spreadsheet | ``   | `U+0F1C3`   |
+| Code        | ``   | `U+0F121`   |
+| Rust        | ``   | `U+0E7A8`   |
+| Python      | ``   | `U+0E606`   |
+| JavaScript  | ``   | `U+0E74E`   |
+| Shell       | ``   | `U+0F489`   |
+| Markdown    | ``   | `U+0F48A`   |
+| Config      | ``   | `U+0F013`   |
+| Lock file   | ``   | `U+0F023`   |
+| Font        | ``   | `U+0F031`   |
+| Generic     | ``   | `U+0F15B`   |
 
 #### NerdFont — named directories
 
-| Directory name(s)              | Glyph |
-|--------------------------------|-------|
-| `.config`                      | ``   |
-| `.ssh`                         | ``   |
-| `.git`, `.github`              | ``   |
-| `downloads`                    | ``   |
-| `documents`                    | ``   |
-| `desktop`                      | ``   |
-| `pictures`, `photos`, `images` | ``   |
-| `videos`                       | ``   |
-| `music`, `audio`               | ``   |
-| `games`                        | ``   |
-| `projects`, `dev`, `code`, `src` | `` |
-| `home`                         | ``   |
-| `bin`, `scripts`               | ``   |
-| `themes`                       | ``   |
-| `fonts`                        | ``   |
-| `node_modules`                 | ``   |
-| `target`                       | ``   |
-| `dotfiles`                     | ``   |
+| Directory name(s)                        | Glyph |
+|------------------------------------------|-------|
+| `.config`                                | ``   |
+| `.local`                                 | ``   |
+| `.cache`                                 | ``   |
+| `.ssh`, `root`                           | ``   |
+| `.git`, `.github`                        | ``   |
+| `downloads`                              | ``   |
+| `documents`                              | ``   |
+| `desktop`                                | ``   |
+| `pictures`, `photos`, `images`, `icons`, `wallpapers`, `walls` | ``   |
+| `videos`                                 | ``   |
+| `music`, `audio`                         | ``   |
+| `games`                                  | ``   |
+| `projects`, `dev`, `code`, `src`         | ``   |
+| `home`                                   | ``   |
+| `tmp`, `temp`                            | ``   |
+| `bin`, `scripts`                         | ``   |
+| `lib`, `lib64`                           | ``   |
+| `etc`                                    | ``   |
+| `usr`                                    | ``   |
+| `var`                                    | ``   |
+| `opt`                                    | ``   |
+| `boot`                                   | ``   |
+| `node_modules`                           | ``   |
+| `target`                                 | ``   |
+| `public`                                 | ``   |
+| `themes`                                 | `󰔎`   |
+| `fonts`                                  | ``   |
+| `dotfiles`                               | ``   |
 
 #### Emoji — file kinds
 
-| Kind      | Emoji |
-|-----------|-------|
-| Directory | 📁    |
-| Symlink   | 🔗    |
-| Image     | 🖼     |
-| Video     | 🎬    |
-| Audio     | 🎵    |
-| Archive   | 📦    |
-| Document  | 📄    |
-| Code      | 📝    |
+| Kind       | Emoji |
+|------------|-------|
+| Directory  | 📁    |
+| Symlink    | 🔗    |
+| Image      | 🖼    |
+| Video      | 🎬    |
+| Audio      | 🎵    |
+| Archive    | 📦    |
+| Document   | 📄    |
+| Code       | 📝    |
 | Executable | ⚙    |
+| Other      | 📄    |
+
+**Named directories (emoji)**
+
+| Directory name(s)                        | Emoji |
+|------------------------------------------|-------|
+| `.config`, `.local`, `.cache`            | ⚙️   |
+| `.ssh`                                   | 🔒    |
+| `.git`, `.github`                        | 🐙    |
+| `downloads`                              | ⬇️   |
+| `documents`                              | 📄    |
+| `desktop`                                | 🖥️   |
+| `pictures`, `photos`, `images`           | 🖼️   |
+| `videos`                                 | 🎬    |
+| `music`, `audio`                         | 🎵    |
+| `games`                                  | 🎮    |
+| `projects`, `dev`, `code`, `src`         | 💻    |
 
 #### Minimal — file kinds
 
-| Kind      | Char |
-|-----------|------|
-| Directory | `▸`  |
-| Symlink   | `↪`  |
-| Image     | `i`  |
-| Video     | `v`  |
-| Audio     | `a`  |
-| Archive   | `z`  |
-| Document  | `d`  |
-| Code      | `c`  |
+| Kind       | Char |
+|------------|------|
+| Directory  | `▸`  |
+| Symlink    | `↪`  |
+| Image      | `i`  |
+| Video      | `v`  |
+| Audio      | `a`  |
+| Archive    | `z`  |
+| Document   | `d`  |
+| Code       | `c`  |
 | Executable | `x` |
-| Other     | `f`  |
+| Other      | `f`  |
 
 ---
 
