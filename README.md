@@ -39,10 +39,12 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 | 🗃️ | **Multi-tab support** |
 | 🔍 | **Fuzzy search** with live streaming results |
 | 🖼️ | **Image & video preview** |
+| 🕐 | **Live clock** in tab bar with toggleable file date/time column |
 | 🎨 | **23 built-in themes** + community theme support |
 | 🔤 | **Nerd Font, Emoji, Minimal and None** icon sets |
 | ⌨️ | **Fully configurable keybinds** |
 | 📂 | **Configurable file openers** per file type |
+| 📦 | **Built-in archive extraction** for `.rar`, `.zip`, `.tar.*`, `.7z` and more |
 | ⚙️ | **Settings UI** with live apply |
 | 🌐 | **External themes** loaded from `~/.local/share/VoidDream/themes/` |
 
@@ -66,8 +68,7 @@ sudo install -Dm755 target/release/VoidDream /usr/bin/VoidDream
 **Optional runtime dependencies:**
 
 ```bash
-sudo pacman -S ffmpeg mpv mirage neovim libreoffice-fresh
-yay -S ouch   # or: paru -S ouch
+sudo pacman -S ffmpeg mpv neovim chafa unrar unzip p7zip zstd
 ```
 
 ---
@@ -94,7 +95,7 @@ sudo install -Dm755 target/release/VoidDream /usr/bin/VoidDream
 **Optional runtime dependencies:**
 
 ```bash
-sudo dnf install ffmpeg mpv neovim libreoffice
+sudo dnf install ffmpeg mpv neovim chafa unrar unzip p7zip zstd
 ```
 
 ---
@@ -103,14 +104,18 @@ sudo dnf install ffmpeg mpv neovim libreoffice
 
 Requires **Rust ≥ 1.85** to build.
 
-| Package       | Purpose                  | Required |
-|---------------|--------------------------|----------|
-| `ffmpeg`      | Video thumbnails         | Optional |
-| `mpv`         | Video / audio playback   | Optional |
-| `mirage`      | Image viewer             | Optional |
-| `nvim`        | Text editor              | Optional |
-| `libreoffice` | Document opener          | Optional |
-| `ouch`        | Archive extraction       | Optional |
+| Package  | Purpose                              | Required |
+|----------|--------------------------------------|----------|
+| `ffmpeg` | Video thumbnails                     | Optional |
+| `chafa`  | Image preview fallback               | Optional |
+| `mpv`    | Video / audio playback               | Optional |
+| `nvim`   | Text editor                          | Optional |
+| `unrar`  | `.rar` extraction                    | Optional |
+| `unzip`  | `.zip` extraction                    | Optional |
+| `p7zip`  | `.7z` extraction                     | Optional |
+| `zstd`   | `.zst` / `.tar.zst` extraction       | Optional |
+
+> `tar`, `gzip`, `bzip2` and `xz` are part of the base system and are always present.
 
 ---
 
@@ -122,33 +127,35 @@ Config is stored at `~/.config/VoidDream/config.json` and is created automatical
 |-----|---------|-------------|
 | `theme` | `catppuccin-macchiato` | Active theme |
 | `icon_set` | `nerdfont` | `nerdfont` / `emoji` / `minimal` / `none` |
-| `show_hidden` | `false` | Show hidden files |
-| `date_format` | `%Y-%m-%d` | Date format in file list |
+| `show_hidden` | `true` | Show hidden files |
+| `date_format` | `%d/%m/%Y %H:%M` | Date format in file list |
+| `show_clock` | `true` | Live clock in tab bar |
+| `show_file_mtime` | `true` | Date/time column in file list |
 | `opener_image` | `mirage` | Image opener |
 | `opener_video` | `mpv` | Video opener |
 | `opener_audio` | `mpv` | Audio opener |
 | `opener_doc` | `libreoffice` | Document opener |
 | `opener_editor` | `nvim` | Text editor |
-| `opener_archive` | `ouch decompress` | Archive opener |
-| `opener_terminal` | ` ` | Terminal opener |
 
 ---
 
 ## Keybinds
 
-All keybinds are configurable from the settings UI — press `S` to open it.
+All configurable keybinds can be changed from the settings UI — press `:` to open it.
 
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
-| `↑` / `↓` | Navigate | `Space` | Select file |
-| `→` / `Enter` | Open / enter dir | `Ctrl+a` | Select all |
-| `←` / `Backspace` | Go up | `/` | Fuzzy search |
-| `c` | Copy | `.` | Toggle hidden files |
-| `u` | Cut | `Tab` | Next tab |
-| `p` | Paste | `t` | New tab |
-| `d` | Delete | `x` | Close tab |
-| `r` | Rename | `S` | Settings |
-| `f` | New file | `q` | Quit |
+| `↑` / `↓` | Navigate | `Space` | Select / deselect |
+| `→` / `Enter` | Open / enter dir | `Ctrl+a` / `A` | Select all |
+| `←` / `Backspace` | Go up | `Ctrl+r` | Deselect all |
+| `Page Up/Down` | Jump 10 entries | `/` | Fuzzy search |
+| `Home` / `End` | First / last entry | `.` | Toggle hidden files |
+| `c` | Copy | `Tab` | Cycle tabs |
+| `u` | Cut | `t` | New tab |
+| `p` | Paste | `x` | Close tab |
+| `d` | Delete | `:` | Settings |
+| `r` | Rename | `?` | Help |
+| `f` | New file | `q` / `Esc` | Quit |
 | `m` | New directory | | |
 
 ---
@@ -167,16 +174,58 @@ For the full theme JSON format and icon reference, see [THEMING.md](THEMING.md).
 
 ```
 VoidDream/
-├── src/                  # Rust source code
-├── themes/               # Built-in theme JSON files
-├── icons/                # Icon set JSON files
-├── Previews/             # Screenshots
-├── CHANGELOG.md          # Version history
-├── CONTRIBUTING.md       # Contributor License Agreement
-├── THEMING.md            # Theme & icon set API for users
-├── Cargo.toml            # Rust package manifest
-├── LICENSE               # GPL-3.0-or-later
-└── README.md
+├── src/
+│   └── main.rs
+├── assets/
+│   └── desktop/
+│       └── io.github.FemBoyGamerTechGuy.VoidDream.desktop
+├── icons/
+│   ├── emoji.json
+│   ├── minimal.json
+│   ├── nerdfont.json
+│   └── none.json
+├── packaging/
+│   ├── README.md
+│   ├── build-deb.sh
+│   ├── build-packages.sh
+│   └── build-rpm.sh
+├── Previews/
+│   ├── 2026-03-10-145022_hyprshot.png
+│   ├── 2026-03-10-145035_hyprshot.png
+│   ├── 2026-03-10-145054_hyprshot.png
+│   ├── 2026-03-10-145154_hyprshot.png
+│   └── 2026-03-10-145208_hyprshot.png
+├── themes/
+│   ├── ayu-dark.json
+│   ├── btop-dark.json
+│   ├── btop-default.json
+│   ├── catppuccin-frappe.json
+│   ├── catppuccin-latte.json
+│   ├── catppuccin-macchiato.json
+│   ├── catppuccin-mocha.json
+│   ├── dracula.json
+│   ├── everforest-dark.json
+│   ├── gruvbox-dark.json
+│   ├── gruvbox-light.json
+│   ├── kanagawa.json
+│   ├── material-ocean.json
+│   ├── nord.json
+│   ├── onedark.json
+│   ├── rose-pine-dawn.json
+│   ├── rose-pine-moon.json
+│   ├── rose-pine.json
+│   ├── solarized-dark.json
+│   ├── solarized-light.json
+│   ├── tokyo-night-light.json
+│   ├── tokyo-night-storm.json
+│   └── tokyo-night.json
+├── .gitignore
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── Cargo.toml
+├── LICENSE
+├── README.md
+└── THEMING.md
 ```
 
 ---

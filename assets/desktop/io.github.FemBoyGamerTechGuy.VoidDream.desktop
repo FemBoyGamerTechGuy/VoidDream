@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=VoidDream
+Comment=A dreamy void-themed TUI file manager
+Exec=VoidDream
+Icon=utilities-file-manager
+Terminal=true
+Type=Application
+Categories=System;FileManager;
+Keywords=file;manager;tui;terminal;void;dream;
+StartupNotify=false

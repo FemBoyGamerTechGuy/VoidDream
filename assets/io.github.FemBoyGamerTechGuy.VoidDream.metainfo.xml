@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>io.github.FemBoyGamerTechGuy.VoidDream</id>
+  <name>VoidDream</name>
+  <summary>A dreamy void-themed TUI file manager</summary>
+  <description>
+    <p>
+      VoidDream is a fast, keyboard-driven file manager for the terminal.
+      It features a classic three-pane layout, live file previews, fuzzy search,
+      multi-tab navigation, and a fully themeable interface.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/FemBoyGamerTechGuy/VoidDream</url>
+  <url type="bugtracker">https://github.com/FemBoyGamerTechGuy/VoidDream/issues</url>
+  <metadata_license>MIT</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.FemBoyGamerTechGuy">
+    <name>FemBoyGamerTechGuy</name>
+  </developer>
+  <releases>
+    <release version="0.1.0" date="2026-03-10"/>
+  </releases>
+  <categories>
+    <category>System</category>
+    <category>FileManager</category>
+  </categories>
+  <provides>
+    <binary>VoidDream</binary>
+  </provides>
+</component>

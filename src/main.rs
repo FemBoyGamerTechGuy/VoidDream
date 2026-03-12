@@ -32,7 +32,7 @@ use std::{
 
 // ─── User-defined themes ──────────────────────────────────────────────────────
 /// One user theme, loaded from a single JSON file in
-///   ~/.local/share/fd-files/themes/
+///   /usr/share/VoidDream/themes/ and ~/.local/share/VoidDream/themes/
 ///
 /// Each file in that directory is one theme.
 /// The filename (without the .json extension) becomes the theme name,
@@ -85,38 +85,48 @@ pub struct UserThemeEntry {
 }
 
 impl UserThemeEntry {
-    /// Returns ~/.local/share/fd-files/themes/
-    pub fn themes_dir() -> PathBuf {
+    /// Directories to scan for themes, in priority order:
+    ///   1. /usr/share/VoidDream/themes/     — system-installed (from package)
+    ///   2. ~/.local/share/VoidDream/themes/ — user themes (override system ones)
+    pub fn theme_dirs() -> Vec<PathBuf> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        PathBuf::from(home).join(".local").join("share").join("fd-files").join("themes")
+        vec![
+            PathBuf::from("/usr/share/VoidDream/themes"),
+            PathBuf::from(home).join(".local").join("share").join("VoidDream").join("themes"),
+        ]
     }
 
-    /// Scan the themes directory and load every *.json file.
+    /// Scan all theme directories and load every *.json file.
     /// The theme name is the filename stem (e.g. "Fire Aura.json" → "Fire Aura").
+    /// User themes (~/.local) override system themes (/usr/share) with the same name.
     /// Files that fail to parse are silently skipped.
     pub fn load_all() -> Vec<Self> {
-        let dir = Self::themes_dir();
-        if !dir.exists() { return vec![]; }
-        let mut themes = Vec::new();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            let mut paths: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-                .collect();
-            paths.sort(); // deterministic order
-            for path in paths {
-                let name = path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if name.is_empty() { continue; }
-                if let Ok(text) = fs::read_to_string(&path) {
-                    if let Ok(colors) = serde_json::from_str::<UserThemeColors>(&text) {
-                        themes.push(UserThemeEntry { name, colors });
+        let mut seen: std::collections::HashMap<String, UserThemeEntry> = std::collections::HashMap::new();
+        for dir in Self::theme_dirs() {
+            if !dir.exists() { continue; }
+            if let Ok(entries) = fs::read_dir(&dir) {
+                let mut paths: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+                    .collect();
+                paths.sort();
+                for path in paths {
+                    let name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.is_empty() { continue; }
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        if let Ok(colors) = serde_json::from_str::<UserThemeColors>(&text) {
+                            // Later dirs (user) override earlier dirs (system)
+                            seen.insert(name.clone(), UserThemeEntry { name, colors });
+                        }
                     }
                 }
             }
         }
+        let mut themes: Vec<Self> = seen.into_values().collect();
+        themes.sort_by(|a, b| a.name.cmp(&b.name));
         themes
     }
 
@@ -447,8 +457,11 @@ pub struct Config {
     pub key_quit:          String,
     pub key_new_tab:       String,
     pub key_close_tab:     String,
+    pub key_cycle_tab:     String,
     pub key_select:        String,
     pub key_select_all:    String,
+    pub show_clock:        bool,   // live HH:MM:SS clock in tab bar
+    pub show_file_mtime:   bool,   // date/time column in file panes
 }
 
 impl Default for Config {
@@ -459,14 +472,16 @@ impl Default for Config {
             theme: "catppuccin-macchiato".into(), icon_set: "nerdfont".into(),
             opener_image: "mirage".into(), opener_video: "mpv".into(),
             opener_audio: "mpv".into(), opener_doc: "libreoffice".into(),
-            opener_editor: "nvim".into(), opener_archive: "ouch decompress".into(),
+            opener_editor: "nvim".into(), opener_archive: String::new(),
             key_copy: "c".into(), key_cut: "u".into(), key_paste: "p".into(),
             key_delete: "d".into(), key_rename: "r".into(),
             key_new_file: "f".into(), key_new_dir: "m".into(),
             key_search: "/".into(), key_toggle_hidden: ".".into(),
-            key_quit: "q".into(), key_new_tab: "Tab".into(),
-            key_close_tab: "Tab+r".into(), key_select: "Space".into(),
-            key_select_all: "Ctrl+a".into(),
+            key_quit: "q".into(), key_new_tab: "t".into(),
+            key_close_tab: "x".into(), key_cycle_tab: "Tab".into(),
+            key_select: "Space".into(), key_select_all: "Ctrl+a".into(),
+            show_clock: true,
+            show_file_mtime: true,
         }
     }
 }
@@ -474,7 +489,7 @@ impl Default for Config {
 impl Config {
     fn config_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        PathBuf::from(home).join(".config").join("fd-files").join("config.json")
+        PathBuf::from(home).join(".config").join("VoidDream").join("config.json")
     }
     fn load() -> Self {
         let p = Self::config_path();
@@ -679,17 +694,19 @@ fn file_size_str(path: &Path) -> String {
     if path.is_dir() { return String::new(); }
     path.metadata().map(|m| human_size(m.len())).unwrap_or("?".into())
 }
-fn format_mtime(path: &Path, fmt: &str) -> String {
+/// Returns (time_str, date_str) split from the mtime, e.g. ("20:54", "07/03/2026")
+fn format_mtime_split(path: &Path) -> (String, String) {
     use std::time::SystemTime;
-    path.metadata().and_then(|m| m.modified()).map(|t| {
-        let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let (y,mo,d,h,mi) = secs_to_datetime(secs);
-        fmt.replace("%Y", &format!("{:04}", y))
-           .replace("%m", &format!("{:02}", mo))
-           .replace("%d", &format!("{:02}", d))
-           .replace("%H", &format!("{:02}", h))
-           .replace("%M", &format!("{:02}", mi))
-    }).unwrap_or_else(|_| "?".into())
+    if let Ok(meta) = path.metadata() {
+        if let Ok(modified) = meta.modified() {
+            let secs = modified.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let (y, mo, d, h, mi) = secs_to_datetime(secs);
+            let time = format!("{:02}:{:02}", h, mi);
+            let date = format!("{:02}/{:02}/{:04}", d, mo, y);
+            return (time, date);
+        }
+    }
+    ("?".into(), "?".into())
 }
 fn secs_to_datetime(secs: u64) -> (u64,u64,u64,u64,u64) {
     let mi=(secs%3600)/60; let h=(secs%86400)/3600; let days=secs/86400;
@@ -701,6 +718,32 @@ fn secs_to_datetime(secs: u64) -> (u64,u64,u64,u64,u64) {
     (y,mo,rem+1,h,mi)
 }
 fn is_leap(y:u64)->bool { y%4==0&&(y%100!=0||y%400==0) }
+
+fn current_time_str() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (_, _, _, h, mi) = secs_to_datetime(secs);
+    // get seconds separately
+    let raw = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sc = raw % 60;
+    format!("{:02}:{:02}:{:02}", h, mi, sc)
+}
+
+fn current_date_str() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, mo, d, _, _) = secs_to_datetime(secs);
+    format!("{:02}/{:02}/{:04}", d, mo, y)
+}
 
 fn list_dir(path: &Path, show_hidden: bool) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = match fs::read_dir(path) {
@@ -720,9 +763,7 @@ fn list_dir(path: &Path, show_hidden: bool) -> Vec<PathBuf> {
 fn dirs_home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
 }
-fn which(cmd: &str) -> bool {
-    Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
-}
+
 fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -755,23 +796,58 @@ impl SettingsState {
         match s {
             SettingsSection::Behaviour  => vec![
                 ("show_hidden","Show hidden files"), ("date_format","Date format"),
+                ("show_clock","Show clock in tab bar"),
+                ("show_file_mtime","Show file date/time in file list"),
             ],
             SettingsSection::Appearance => vec![
                 ("col_parent","Parent pane width (%)"), ("col_files","Files pane width (%)"),
-                ("theme","Theme"), ("icon_set","Icon set (nerdfont/emoji/minimal/none)"),
+                ("theme","Theme"), ("icon_set","Icon theme"),
             ],
             SettingsSection::Openers    => vec![
                 ("opener_image","Image"), ("opener_video","Video"), ("opener_audio","Audio"),
-                ("opener_doc","Documents"), ("opener_editor","Editor"), ("opener_archive","Archives"),
+                ("opener_doc","Documents"), ("opener_editor","Editor"),
+                // Archive extraction is built-in per format
+                ("fixed_arc_rar",  "Archive .rar"),
+                ("fixed_arc_zip",  "Archive .zip"),
+                ("fixed_arc_tgz",  "Archive .tar.gz / .tgz"),
+                ("fixed_arc_tbz2", "Archive .tar.bz2 / .tbz2"),
+                ("fixed_arc_txz",  "Archive .tar.xz"),
+                ("fixed_arc_tzst", "Archive .tar.zst"),
+                ("fixed_arc_tar",  "Archive .tar"),
+                ("fixed_arc_gz",   "Archive .gz"),
+                ("fixed_arc_bz2",  "Archive .bz2"),
+                ("fixed_arc_xz",   "Archive .xz"),
+                ("fixed_arc_zst",  "Archive .zst"),
+                ("fixed_arc_7z",   "Archive .7z"),
             ],
             SettingsSection::Keybinds   => vec![
-                ("key_copy","Copy"), ("key_cut","Cut"), ("key_paste","Paste"),
-                ("key_delete","Delete"), ("key_rename","Rename"),
-                ("key_new_file","New file"), ("key_new_dir","New directory"),
-                ("key_search","Search"), ("key_toggle_hidden","Toggle hidden"),
-                ("key_quit","Quit"), ("key_new_tab","New tab"),
-                ("key_close_tab","Close tab"), ("key_select","Select"),
-                ("key_select_all","Select all"),
+                // Configurable
+                ("key_select",       "Select / deselect"),
+                ("key_select_all",   "Select all"),
+                ("key_copy",         "Copy"),
+                ("key_cut",          "Cut"),
+                ("key_paste",        "Paste"),
+                ("key_delete",       "Delete"),
+                ("key_rename",       "Rename"),
+                ("key_new_file",     "New file"),
+                ("key_new_dir",      "New directory"),
+                ("key_search",       "Fuzzy search"),
+                ("key_toggle_hidden","Toggle hidden files"),
+                ("key_new_tab",      "New tab"),
+                ("key_close_tab",    "Close tab"),
+                ("key_cycle_tab",    "Cycle tabs"),
+                ("key_quit",         "Quit"),
+                // Fixed (not configurable)
+                ("fixed_nav",        "Navigate"),
+                ("fixed_open",       "Open / enter dir"),
+                ("fixed_up",         "Go up"),
+                ("fixed_pgupdown",   "Jump 10 entries"),
+                ("fixed_homeend",    "First / last entry"),
+                ("fixed_deselect",   "Deselect all"),
+                ("fixed_sel_all2",   "Select all (alt)"),
+                ("fixed_settings",   "Open settings"),
+                ("fixed_help",       "Show help"),
+                ("fixed_quit2",      "Quit (alt)"),
             ],
         }
     }
@@ -779,13 +855,17 @@ impl SettingsState {
         match key {
             "theme"       => Some(Theme::all_names_merged(user_themes)),
             "icon_set"    => Some(vec!["nerdfont","emoji","minimal","none"].iter().map(|s| s.to_string()).collect()),
-            "show_hidden" => Some(vec!["true".to_string(), "false".to_string()]),
+            "show_hidden"      => Some(vec!["true".to_string(), "false".to_string()]),
+            "show_clock"       => Some(vec!["true".to_string(), "false".to_string()]),
+            "show_file_mtime"  => Some(vec!["true".to_string(), "false".to_string()]),
             _ => None,
         }
     }
     fn get_value(key: &str, cfg: &Config) -> String {
         match key {
             "show_hidden"       => cfg.show_hidden.to_string(),
+            "show_clock"        => cfg.show_clock.to_string(),
+            "show_file_mtime"   => cfg.show_file_mtime.to_string(),
             "date_format"       => cfg.date_format.clone(),
             "col_parent"        => cfg.col_parent.to_string(),
             "col_files"         => cfg.col_files.to_string(),
@@ -809,14 +889,39 @@ impl SettingsState {
             "key_quit"          => cfg.key_quit.clone(),
             "key_new_tab"       => cfg.key_new_tab.clone(),
             "key_close_tab"     => cfg.key_close_tab.clone(),
+            "key_cycle_tab"     => cfg.key_cycle_tab.clone(),
             "key_select"        => cfg.key_select.clone(),
             "key_select_all"    => cfg.key_select_all.clone(),
+            "fixed_arc_rar"   => "unrar x -o+  (built-in)".into(),
+            "fixed_arc_zip"   => "unzip -o  (built-in)".into(),
+            "fixed_arc_tgz"   => "tar -xzf  (built-in)".into(),
+            "fixed_arc_tbz2"  => "tar -xjf  (built-in)".into(),
+            "fixed_arc_txz"   => "tar -xJf  (built-in)".into(),
+            "fixed_arc_tzst"  => "tar --zstd -xf  (built-in)".into(),
+            "fixed_arc_tar"   => "tar -xf  (built-in)".into(),
+            "fixed_arc_gz"    => "gunzip -kf  (built-in)".into(),
+            "fixed_arc_bz2"   => "bunzip2 -kf  (built-in)".into(),
+            "fixed_arc_xz"    => "xz -dkf  (built-in)".into(),
+            "fixed_arc_zst"   => "zstd -dkf  (built-in)".into(),
+            "fixed_arc_7z"    => "7z x -y  (built-in)".into(),
+            "fixed_nav"        => "\u{2191} / \u{2193}  (fixed)".into(),
+            "fixed_open"       => "\u{2192} / Enter  (fixed)".into(),
+            "fixed_up"         => "\u{2190} / Backspace  (fixed)".into(),
+            "fixed_pgupdown"   => "Page Up / Page Down  (fixed)".into(),
+            "fixed_homeend"    => "Home / End  (fixed)".into(),
+            "fixed_deselect"   => "Ctrl+r  (fixed)".into(),
+            "fixed_sel_all2"   => "A  (fixed)".into(),
+            "fixed_settings"   => ":  (fixed)".into(),
+            "fixed_help"       => "?  (fixed)".into(),
+            "fixed_quit2"      => "Esc  (fixed)".into(),
             _ => String::new(),
         }
     }
     fn set_value(key: &str, val: &str, cfg: &mut Config) {
         match key {
             "show_hidden"       => cfg.show_hidden = val == "true",
+            "show_clock"        => cfg.show_clock = val == "true",
+            "show_file_mtime"   => cfg.show_file_mtime = val == "true",
             "date_format"       => cfg.date_format = val.into(),
             "col_parent"        => { if let Ok(n) = val.parse::<u16>() { cfg.col_parent = n.clamp(10,40); } }
             "col_files"         => { if let Ok(n) = val.parse::<u16>() { cfg.col_files  = n.clamp(20,60); } }
@@ -840,6 +945,7 @@ impl SettingsState {
             "key_quit"          => cfg.key_quit          = val.into(),
             "key_new_tab"       => cfg.key_new_tab       = val.into(),
             "key_close_tab"     => cfg.key_close_tab     = val.into(),
+            "key_cycle_tab"     => cfg.key_cycle_tab     = val.into(),
             "key_select"        => cfg.key_select        = val.into(),
             "key_select_all"    => cfg.key_select_all    = val.into(),
             _ => {}
@@ -931,6 +1037,7 @@ enum InputMode {
     NewDir,
     Confirm,
     Settings,
+    Help,
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -965,7 +1072,9 @@ struct App {
     vid_thumb_file:  Option<PathBuf>,   // temp PNG on disk
     vid_thumb_state: Option<StatefulProtocol>,
     vid_thumb_rx:    Option<mpsc::Receiver<PathBuf>>, // signals thumb is ready
-    // User-defined themes loaded from ~/.config/fd-files/themes.json
+    // Live clock string, updated every tick
+    clock_str:    String,
+    // User-defined themes loaded from system and user theme directories
     user_themes:  Vec<UserThemeEntry>,
 }
 impl App {
@@ -993,6 +1102,7 @@ impl App {
             vid_thumb_file: None,
             vid_thumb_state: None,
             vid_thumb_rx: None,
+            clock_str: current_time_str(),
             user_themes,
         }
     }
@@ -1004,6 +1114,7 @@ impl App {
         self.msg_time   = Some(Instant::now());
     }
     fn tick(&mut self) {
+        self.clock_str = current_time_str();
         if let Some(t) = self.msg_time {
             if t.elapsed() > Duration::from_secs(4) {
                 self.status_msg.clear(); self.msg_time = None;
@@ -1146,15 +1257,96 @@ impl App {
     }
     fn extract_archive(&mut self, path: &Path) {
         let dst = path.parent().unwrap_or(Path::new("."));
-        let parts: Vec<&str> = self.cfg.opener_archive.split_whitespace().collect();
-        let res = if parts.len() >= 2 {
-            Command::new(parts[0]).args(&parts[1..]).arg(path).arg("--dir").arg(dst).spawn()
-        } else if which("tar") {
-            Command::new("tar").args(["xf", &path.to_string_lossy(), "-C", &dst.to_string_lossy()]).spawn()
+        let dst_s = dst.to_string_lossy().into_owned();
+        let src_s = path.to_string_lossy().into_owned();
+        let ext = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        // Also check double-extension e.g. .tar.gz / .tar.bz2 / .tar.xz / .tar.zst
+        let name_lower = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        // All commands are spawned detached with stdio suppressed so they
+        // never bleed into the TUI — stdout/stderr → /dev/null, no wait.
+        let null = std::process::Stdio::null;
+
+        let res: std::io::Result<std::process::Child> = if ext == "rar" {
+            // unrar x <archive> <dest/>
+            Command::new("unrar")
+                .args(["x", "-o+", &src_s, &format!("{}/", dst_s)])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "zip" {
+            // unzip -o <archive> -d <dest>
+            Command::new("unzip")
+                .args(["-o", &src_s, "-d", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+            Command::new("tar")
+                .args(["-xzf", &src_s, "-C", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
+            Command::new("tar")
+                .args(["-xjf", &src_s, "-C", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if name_lower.ends_with(".tar.xz") {
+            Command::new("tar")
+                .args(["-xJf", &src_s, "-C", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if name_lower.ends_with(".tar.zst") {
+            Command::new("tar")
+                .args(["--zstd", "-xf", &src_s, "-C", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "tar" {
+            Command::new("tar")
+                .args(["-xf", &src_s, "-C", &dst_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "gz" {
+            // Plain .gz (not tar) — gunzip in place
+            Command::new("gunzip")
+                .args(["-kf", &src_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "bz2" {
+            Command::new("bunzip2")
+                .args(["-kf", &src_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "xz" {
+            Command::new("xz")
+                .args(["-dkf", &src_s])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "zst" {
+            Command::new("zstd")
+                .args(["-dkf", &src_s, "-o", &format!("{}/{}", dst_s,
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"))])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
+        } else if ext == "7z" {
+            Command::new("7z")
+                .args(["x", &src_s, &format!("-o{}", dst_s), "-y"])
+                .stdout(null()).stderr(null()).stdin(null())
+                .spawn()
         } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "no extractor"))
+            Err(io::Error::new(io::ErrorKind::InvalidInput,
+                format!("No extractor for .{}", ext)))
         };
-        match res { Ok(_) => self.msg("Extracting\u{2026}", false), Err(e) => self.msg(&e.to_string(), true) }
+
+        match res {
+            Ok(_)  => self.msg(&format!("Extracting {} \u{2026}", 
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false),
+            Err(e) => self.msg(&format!("Extract error: {}", e), true),
+        }
     }
     fn new_tab(&mut self) {
         let cwd = self.tab().cwd.clone(); let sh = self.cfg.show_hidden;
@@ -1324,25 +1516,63 @@ fn ui(f: &mut Frame, app: &mut App) {
         InputMode::FuzzySearch => draw_fuzzy_overlay(f, app, sz),
         InputMode::Rename(_) | InputMode::NewFile | InputMode::NewDir => draw_input_overlay(f, app, sz),
         InputMode::Confirm => draw_confirm_overlay(f, app, sz),
+        InputMode::Help => draw_help_overlay(f, app, sz),
         _ => {}
     }
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, rect: Rect) {
-    let titles: Vec<Line> = app.tabs.iter().enumerate().map(|(i, tab)| {
+    // Fill the whole bar with surface0 first
+    let bg_block = Block::default().style(st_bg(app.theme.subtext, app.theme.surface0));
+    f.render_widget(bg_block, rect);
+
+    // Right side: clock + date (if enabled)
+    let clock_widget_w: u16 = if app.cfg.show_clock {
+        // " HH:MM:SS  DD/MM/YYYY " = ~22 chars
+        let clock_label = format!(" \u{f017} {}   \u{f073} {} ", app.clock_str, current_date_str());
+        let w = clock_label.chars().count() as u16;
+        let cx = rect.x + rect.width.saturating_sub(w);
+        let clock_rect = Rect { x: cx, y: rect.y, width: w, height: 1 };
+        f.render_widget(
+            Paragraph::new(Span::styled(clock_label, bold_bg(app.theme.mauve, app.theme.surface0))),
+            clock_rect,
+        );
+        w
+    } else { 0 };
+
+    let available = rect.width.saturating_sub(clock_widget_w);
+    let mut x = rect.x;
+    for (i, tab) in app.tabs.iter().enumerate() {
         let name = tab.cwd.file_name().and_then(|n| n.to_str()).unwrap_or("/");
-        let label = format!(" {} {} ", i+1, name);
-        if i == app.tab_idx {
-            Line::from(Span::styled(label, bold_bg(app.theme.base, app.theme.mauve)))
+        let label = format!(" {} {} ", i + 1, name);
+        let is_active = i == app.tab_idx;
+
+        let (fg, bg) = if is_active {
+            (app.theme.base, app.theme.mauve)
         } else {
-            Line::from(Span::styled(label, st_bg(app.theme.subtext, app.theme.surface0)))
+            (app.theme.subtext, app.theme.surface0)
+        };
+
+        let w = label.chars().count() as u16;
+        if x + w > rect.x + available { break; }
+
+        let tab_rect = Rect { x, y: rect.y, width: w, height: 1 };
+        f.render_widget(
+            Paragraph::new(Span::styled(&label, if is_active { bold_bg(fg, bg) } else { st_bg(fg, bg) })),
+            tab_rect,
+        );
+        x += w;
+
+        // Separator after each tab
+        if x < rect.x + available {
+            let sep_rect = Rect { x, y: rect.y, width: 1, height: 1 };
+            f.render_widget(
+                Paragraph::new(Span::styled("\u{e0b0}", st_bg(bg, app.theme.surface0))),
+                sep_rect,
+            );
+            x += 1;
         }
-    }).collect();
-    let tabs = Tabs::new(titles)
-        .select(app.tab_idx)
-        .style(st_bg(app.theme.subtext, app.theme.surface0))
-        .divider(Span::raw(""));
-    f.render_widget(tabs, rect);
+    }
 }
 
 fn draw_body(f: &mut Frame, app: &mut App, rect: Rect) {
@@ -1415,12 +1645,18 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
             let (fg, bg) = if is_cur { (app.theme.base, app.theme.mauve) }
                            else if is_sel { (app.theme.mauve, app.theme.surface0) }
                            else { (fg, app.theme.base) };
-            let max_name = (rect.width.saturating_sub(9)) as usize;
+            let mtime_str = if app.cfg.show_file_mtime {
+                let (t, d) = format_mtime_split(e);
+                format!("  {} {}", t, d)
+            } else { String::new() };
+            let mtime_w = mtime_str.chars().count() as u16;
+            let max_name = (rect.width.saturating_sub(14 + mtime_w)) as usize;
             let name_clipped: String = name.chars().take(max_name).collect();
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
                 Span::styled(name_clipped, st_bg(fg, bg)),
                 Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.base } else { app.theme.overlay0 }, bg)),
+                Span::styled(mtime_str, st_bg(app.theme.overlay0, bg)),
             ]))
         }).collect();
 
@@ -1458,15 +1694,16 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     let c    = kind_color(&k, &app.theme);
     let name = current.file_name().and_then(|n| n.to_str()).unwrap_or("?");
     let ext  = current.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+    let size = file_size_str(&current);
 
-    // Header
+    // Header: line1 = icon + name, line2 = size
     let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!(" {} ", file_icon(&current, &k, &app.icon_set)), st_bg(c, app.theme.base)),
             Span::styled(name, bold_bg(c, app.theme.base)),
         ]),
         Line::from(vec![
-            Span::styled(format!("  {}   {}", file_size_str(&current), format_mtime(&current, &app.cfg.date_format)), st_bg(app.theme.overlay0, app.theme.base)),
+            Span::styled(format!("  {} ", size), st_bg(app.theme.overlay0, app.theme.base)),
         ]),
     ]).style(st_bg(app.theme.text, app.theme.base));
     f.render_widget(header, inner[0]);
@@ -1628,30 +1865,110 @@ fn draw_status_bar(f: &mut Frame, app: &App, rect: Rect) {
         spans.push(Span::styled(format!("  \u{f14a} {}  ", tab.selected.len()), bold_bg(app.theme.base, app.theme.mauve)));
     }
     // Right-align count
-    let count_str = format!("  {}/{}", cur, total);
+    let count_str = format!("  {}/{}  ", cur, total);
     let used: usize = spans.iter().map(|s| s.content.len()).sum();
     let pad = (rect.width as usize).saturating_sub(used + count_str.len());
-    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.subtext, app.theme.surface0)));
-    spans.push(Span::styled(count_str, st_bg(app.theme.subtext, app.theme.surface0)));
+    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.subtext, app.theme.base)));
+    spans.push(Span::styled(count_str, bold_bg(app.theme.base, app.theme.surface1)));
 
-    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.subtext, app.theme.surface0));
+    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.subtext, app.theme.base));
     f.render_widget(bar, rect);
 }
 
 fn draw_help_bar(f: &mut Frame, app: &App, rect: Rect) {
-    let items = [
-        ("\u{2195}","nav"), ("BS","up"), ("\u{23ce}","open"),
-        ("Spc","sel"), ("c","copy"), ("u","cut"), ("p","paste"),
-        ("d","del"), ("r","ren"), ("f","file"), ("m","dir"),
-        ("/","find"), ("t","tab+"), ("x","tab-"), ("Tab","tabs"),
-    ];
-    let mut spans = vec![];
-    for (key, action) in &items {
-        spans.push(Span::styled(format!(" {}", key), bold(app.theme.mauve)));
-        spans.push(Span::styled(format!(":{} ", action), st(app.theme.overlay0)));
-    }
-    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.overlay0, app.theme.base));
+    let bar = Paragraph::new(Line::from(vec![
+        Span::styled(" ?", bold(app.theme.mauve)),
+        Span::styled(":help ", st(app.theme.overlay0)),
+    ])).style(st_bg(app.theme.overlay0, app.theme.base));
     f.render_widget(bar, rect);
+}
+
+fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 3 / 4).max(60).min(rect.width);
+    let oh = (rect.height * 4 / 5).max(20).min(rect.height);
+    let ox = (rect.width  - ow) / 2;
+    let oy = (rect.height - oh) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.mauve))
+        .title(Span::styled(
+            "  \u{f128} Keybinds  [Esc / ? to close]  ",
+            bold_bg(app.theme.subtext, app.theme.base),
+        ))
+        .style(st_bg(app.theme.text, app.theme.base));
+    f.render_widget(block, popup);
+
+    let inner = Rect {
+        x: popup.x + 2,
+        y: popup.y + 2,
+        width: popup.width.saturating_sub(4),
+        height: popup.height.saturating_sub(3),
+    };
+
+    let cfg = &app.cfg;
+    let col_w = (inner.width / 2) as usize;
+    let key_col_w = col_w.min(22);
+
+    // Build sections dynamically from live cfg values
+    let nav_section = vec![
+        ("\u{2191} / \u{2193}".to_string(),  "Move cursor up / down".to_string()),
+        ("\u{2192} / Enter".to_string(),     "Open file or enter directory".to_string()),
+        ("\u{2190} / Backspace".to_string(), "Go up to parent directory".to_string()),
+        ("Page Up / Down".to_string(),       "Jump 10 entries".to_string()),
+        ("Home / End".to_string(),           "First / last entry".to_string()),
+    ];
+    let file_section = vec![
+        (cfg.key_select.clone(),             "Select / deselect file".to_string()),
+        ("Ctrl+a  /  A".to_string(),         "Select all".to_string()),
+        ("Ctrl+r".to_string(),               "Deselect all".to_string()),
+        (cfg.key_copy.clone(),               "Copy selected".to_string()),
+        (cfg.key_cut.clone(),                "Cut selected".to_string()),
+        (cfg.key_paste.clone(),              "Paste".to_string()),
+        (cfg.key_delete.clone(),             "Delete selected (with confirm)".to_string()),
+        (cfg.key_rename.clone(),             "Rename".to_string()),
+        (cfg.key_new_file.clone(),           "New file".to_string()),
+        (cfg.key_new_dir.clone(),            "New directory".to_string()),
+    ];
+    let search_section = vec![
+        (cfg.key_search.clone(),             "Fuzzy find (recursive search)".to_string()),
+    ];
+    let tab_section = vec![
+        (cfg.key_new_tab.clone(),            "Open new tab".to_string()),
+        (cfg.key_close_tab.clone(),          "Close current tab".to_string()),
+        (cfg.key_cycle_tab.clone(),           "Cycle to next tab".to_string()),
+    ];
+    let app_section = vec![
+        (cfg.key_toggle_hidden.clone(),      "Toggle hidden files".to_string()),
+        (":".to_string(),                    "Open settings".to_string()),
+        ("?".to_string(),                    "Show this help".to_string()),
+        (format!("{}  /  Esc", cfg.key_quit), "Quit".to_string()),
+    ];
+
+    let sections: &[(&str, &Vec<(String, String)>)] = &[
+        ("\u{f07b}  Navigation",     &nav_section),
+        ("\u{f0c5}  File Operations",&file_section),
+        ("\u{f002}  Search",         &search_section),
+        ("\u{f0e8}  Tabs",           &tab_section),
+        ("\u{f013}  App",            &app_section),
+    ];
+
+    let mut lines: Vec<Line> = vec![];
+    for (section_title, binds) in sections {
+        lines.push(Line::from(Span::styled(format!(" {}", section_title), bold(app.theme.mauve))));
+        for (key, action) in *binds {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<width$}", key, width = key_col_w), bold(app.theme.blue)),
+                Span::styled(action.clone(), st(app.theme.subtext)),
+            ]));
+        }
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+    f.render_widget(p, inner);
 }
 
 fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
@@ -1697,11 +2014,18 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (key, label))| {
         let val = SettingsState::get_value(key, &app.cfg);
         let is_cur = i == app.settings.cursor;
+        let is_fixed = key.starts_with("fixed_");
         let val_display = if app.settings.editing && is_cur {
             format!("{}\u{2588}", app.settings.edit_buf)
         } else { val };
         let (lbg, vbg) = if is_cur { (app.theme.surface0, app.theme.surface1) } else { (app.theme.base, app.theme.base) };
-        let (lfg, vfg) = if is_cur { (app.theme.text, app.theme.mauve) } else { (app.theme.subtext, app.theme.text) };
+        let (lfg, vfg) = if is_fixed {
+            (app.theme.overlay0, app.theme.overlay0)
+        } else if is_cur {
+            (app.theme.text, app.theme.mauve)
+        } else {
+            (app.theme.subtext, app.theme.text)
+        };
         ListItem::new(Line::from(vec![
             Span::styled(format!("  {:30}", label), st_bg(lfg, lbg)),
             Span::styled(format!("  {}  ", val_display), st_bg(vfg, vbg)),
@@ -1884,7 +2208,16 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             if matches!(key, KeyCode::Char('y')|KeyCode::Char('Y')) { app.delete_files(); }
             return false;
         }
+        InputMode::Help => {
+            if matches!(key, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')) {
+                app.mode = InputMode::Normal;
+            }
+            return false;
+        }
     }
+    let cfg = &app.cfg;
+    let _ch = match key { KeyCode::Char(c) => Some(c), _ => None };
+
     match key {
         KeyCode::Up        => app.tab_mut().move_cursor(-1),
         KeyCode::Down      => app.tab_mut().move_cursor(1),
@@ -1894,44 +2227,56 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         KeyCode::PageDown  => app.tab_mut().move_cursor(10),
         KeyCode::Home      => { app.tab_mut().state.select(Some(0)); }
         KeyCode::End       => { let n=app.tab().visible().len(); if n>0 { app.tab_mut().state.select(Some(n-1)); } }
-        KeyCode::Char(' ') => app.tab_mut().toggle_select(),
-        KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().select_all(),
-        KeyCode::Char('A') => app.tab_mut().select_all(),
-        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().deselect_all(),
-        KeyCode::Char('c') => {
-            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-            else { app.yank_files(false); }
-        }
-        KeyCode::Char('u') => {
-            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-            else { app.yank_files(true); }
-        }
-        KeyCode::Char('p') => app.paste_files(),
-        KeyCode::Char('d') => {
-            if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
-            else { app.mode = InputMode::Confirm; }
-        }
-        KeyCode::Char('r') => {
-            if let Some(p) = app.tab().current().cloned() {
-                let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
-                app.input_buf = name.clone(); app.mode = InputMode::Rename(name);
-            }
-        }
-        KeyCode::Char('f') => { app.input_buf.clear(); app.mode = InputMode::NewFile; }
-        KeyCode::Char('m') => { app.input_buf.clear(); app.mode = InputMode::NewDir; }
-        KeyCode::Char('/') => app.open_fuzzy(),
-        KeyCode::Char('.') => {
-            let h = !app.tab().show_hidden;
-            app.tab_mut().show_hidden = h; app.tab_mut().refresh();
-            app.msg(if h {"Hidden files shown"} else {"Hidden files hidden"}, false);
-        }
-        KeyCode::Char('t') => app.new_tab(),
-        KeyCode::Char('x') => app.close_tab(),
-        KeyCode::Tab => {
+        KeyCode::Tab if app.cfg.key_cycle_tab == "Tab" => {
             app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
         }
-        KeyCode::Char(':') => { app.mode = InputMode::Settings; }
-        KeyCode::Esc | KeyCode::Char('q') => return true,
+        KeyCode::Char(' ') if cfg.key_select == "Space" => app.tab_mut().toggle_select(),
+        KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) && cfg.key_select_all == "Ctrl+a" => app.tab_mut().select_all(),
+        KeyCode::Char('A') => app.tab_mut().select_all(),
+        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().deselect_all(),
+        KeyCode::Char(c) => {
+            let s = c.to_string();
+            if s == cfg.key_copy {
+                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                else { app.yank_files(false); }
+            } else if s == cfg.key_cut {
+                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                else { app.yank_files(true); }
+            } else if s == cfg.key_paste {
+                app.paste_files();
+            } else if s == cfg.key_delete {
+                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                else { app.mode = InputMode::Confirm; }
+            } else if s == cfg.key_rename {
+                if let Some(p) = app.tab().current().cloned() {
+                    let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
+                    app.input_buf = name.clone(); app.mode = InputMode::Rename(name);
+                }
+            } else if s == cfg.key_new_file {
+                app.input_buf.clear(); app.mode = InputMode::NewFile;
+            } else if s == cfg.key_new_dir {
+                app.input_buf.clear(); app.mode = InputMode::NewDir;
+            } else if s == cfg.key_search {
+                app.open_fuzzy();
+            } else if s == cfg.key_toggle_hidden {
+                let h = !app.tab().show_hidden;
+                app.tab_mut().show_hidden = h; app.tab_mut().refresh();
+                app.msg(if h {"Hidden files shown"} else {"Hidden files hidden"}, false);
+            } else if s == cfg.key_cycle_tab {
+                app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
+            } else if s == cfg.key_new_tab {
+                app.new_tab();
+            } else if s == cfg.key_close_tab {
+                app.close_tab();
+            } else if s == cfg.key_quit {
+                return true;
+            } else if c == ':' {
+                app.mode = InputMode::Settings;
+            } else if c == '?' {
+                app.mode = InputMode::Help;
+            }
+        }
+        KeyCode::Esc => return true,
         _ => {}
     }
     false
@@ -2001,7 +2346,9 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
         KeyCode::Enter => {
             let items = SettingsState::section_items(&app.settings.section);
             let (k, _) = items[app.settings.cursor];
-            if SettingsState::dropdown_options(k, &app.user_themes).is_some() {
+            if k.starts_with("fixed_") {
+                // Fixed keys are informational — not configurable
+            } else if SettingsState::dropdown_options(k, &app.user_themes).is_some() {
                 // Open dropdown — pre-select current value
                 let cur_val = SettingsState::get_value(k, &app.cfg);
                 let opts    = SettingsState::dropdown_options(k, &app.user_themes).unwrap();
@@ -2075,6 +2422,11 @@ fn handle_input_key(app: &mut App, key: KeyCode) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 fn main() -> Result<()> {
     // ── Auto-create data directories on first run ──────────────────────────
+    // System dirs — silently ignored if not root (package installer handles these)
+    let _ = fs::create_dir_all("/usr/share/VoidDream/themes");
+    let _ = fs::create_dir_all("/usr/share/VoidDream/icons");
+
+    // User dirs — always created, no special permissions needed
     if let Some(home) = std::env::var_os("HOME") {
         let base = PathBuf::from(&home).join(".local").join("share").join("VoidDream");
         let _ = fs::create_dir_all(base.join("themes"));

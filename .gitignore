@@ -1,0 +1,24 @@
+# Rust build output
+/target/
+dist/
+
+# Cargo lock (keep for binaries, ignore for libraries)
+# Cargo.lock is intentionally kept for this binary crate
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.local
+
+# Logs
+*.log
