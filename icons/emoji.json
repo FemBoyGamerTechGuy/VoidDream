@@ -33,7 +33,13 @@
     "default.nix": "❄",
     ".env": "🔒",
     ".env.local": "🔒",
-    ".env.example": "🔒"
+    ".env.example": "🔒",
+    ".bashrc": "🐚",
+    ".bash_profile": "🐚",
+    ".bash_history": "🐚",
+    ".zshrc": "🐚",
+    ".zshenv": "🐚",
+    ".zprofile": "🐚"
   },
   "by_ext": {
     "png": "🖼",

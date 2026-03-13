@@ -1,116 +1,114 @@
-# NovaDream — Packaging
+# VoidDream — Packaging
 
 ## Supported formats
 
-| Format | Distros |
-|--------|---------|
-| `.deb` | Debian, Ubuntu, Linux Mint, Pop!_OS, elementary OS, and derivatives |
-| `.rpm` | Fedora, RHEL, CentOS Stream, AlmaLinux, Rocky Linux, openSUSE, and derivatives |
+| Format | Script | Distros |
+|--------|--------|---------|
+| Arch/Artix | `PKGBUILD` | Arch, Artix, Manjaro, EndeavourOS, and derivatives |
+| `.deb` | `build-deb.sh` | Debian, Ubuntu, Linux Mint, Pop!_OS, and derivatives |
+| `.rpm` | `build-rpm.sh` | Fedora, RHEL, CentOS Stream, AlmaLinux, Rocky, openSUSE |
 
 ---
 
 ## Prerequisites
 
-### Build dependencies
-
-**Debian/Ubuntu:**
-```bash
-sudo apt install build-essential pkg-config libgtk-4-dev libglib2.0-dev
-```
-
-**Fedora/RHEL:**
-```bash
-sudo dnf install gcc pkg-config gtk4-devel glib2-devel
-```
-
 ### Rust toolchain
 ```bash
+# Arch/Artix
+sudo pacman -S rust
+
+# Debian/Ubuntu
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Fedora
+sudo dnf install rust cargo
 ```
 
----
+### Package build tools
 
-## Icons
-
-Before building packages, add PNG icons at the following sizes:
-
-```
-assets/icons/hicolor/16x16/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-assets/icons/hicolor/32x32/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-assets/icons/hicolor/48x48/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-assets/icons/hicolor/64x64/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-assets/icons/hicolor/128x128/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-assets/icons/hicolor/256x256/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-```
-
-If you have a single source image, resize with ImageMagick:
+**Debian/Ubuntu** (for `.deb`):
 ```bash
-for s in 16 32 48 64 128 256; do
-    convert icon.png -resize ${s}x${s} \
-        assets/icons/hicolor/${s}x${s}/apps/io.github.FemBoyGamerTechGuy.NovaDream.png
-done
+sudo apt install dpkg-dev
+```
+
+**Fedora/RHEL** (for `.rpm`):
+```bash
+sudo dnf install rpm-build
 ```
 
 ---
 
 ## Building
 
-### Both formats at once
+### Arch / Artix
 ```bash
-chmod +x packaging/build-packages.sh
-./packaging/build-packages.sh
+git clone https://github.com/FemBoyGamerTechGuy/VoidDream
+cd VoidDream/packaging
+makepkg -si
 ```
 
-### Debian/Ubuntu only
+### Debian / Ubuntu
 ```bash
-./packaging/build-packages.sh --deb-only
-# or directly:
+git clone https://github.com/FemBoyGamerTechGuy/VoidDream
+cd VoidDream
 chmod +x packaging/build-deb.sh
 ./packaging/build-deb.sh
+sudo dpkg -i voiddream_*.deb
 ```
 
-### Fedora/RHEL only
+### Fedora / RHEL
 ```bash
-./packaging/build-packages.sh --rpm-only
-# or directly:
+git clone https://github.com/FemBoyGamerTechGuy/VoidDream
+cd VoidDream
 chmod +x packaging/build-rpm.sh
 ./packaging/build-rpm.sh
+sudo dnf install ./voiddream-*.rpm
 ```
 
 ---
 
-## Installing
+## What gets installed
 
-### Debian/Ubuntu
-```bash
-sudo dpkg -i target/debian/NovaDream_*.deb
-sudo apt-get install -f   # install any missing dependencies
-```
+All three package formats install the same files:
 
-### Fedora
-```bash
-sudo dnf install target/generate-rpm/NovaDream-*.rpm
-```
+| File | Destination |
+|------|-------------|
+| `VoidDream` binary | `/usr/bin/VoidDream` |
+| Theme JSON files | `/usr/share/VoidDream/themes/` |
+| Icon set JSON files | `/usr/share/VoidDream/icons/` |
+| Desktop entry | `/usr/share/applications/` |
+| License | `/usr/share/licenses/voiddream/` |
 
-### RHEL/CentOS/AlmaLinux/Rocky
-```bash
-sudo rpm -i target/generate-rpm/NovaDream-*.rpm
-```
+---
 
-### openSUSE
+## Uninstalling
+
 ```bash
-sudo zypper install target/generate-rpm/NovaDream-*.rpm
+# Arch / Artix
+sudo pacman -R voiddream
+
+# Debian / Ubuntu
+sudo apt remove voiddream
+
+# Fedora / RHEL
+sudo dnf remove voiddream
 ```
 
 ---
 
 ## Runtime dependencies
 
-| Package (Debian) | Package (Fedora) | Purpose |
-|------------------|------------------|---------|
-| `libgtk-4-1` | `gtk4` | UI toolkit |
-| `libglib2.0-0` | `glib2` | GLib runtime |
-| `libayatana-appindicator3-1` | `libayatana-appindicator` | System tray |
+All optional — the app works without them but loses certain features.
 
-Wine/Proton runners are **not** packaged — users download them separately
-(e.g. Proton-GE from GitHub, or system Wine via `apt install wine` / `dnf install wine`).
+| Package | Purpose |
+|---------|---------|
+| `ffmpeg` | Video thumbnails in preview pane |
+| `chafa` | Image preview fallback |
+| `mpv` | Video and audio playback |
+| `neovim` | Text editor integration |
+| `unrar` | `.rar` extraction |
+| `unzip` | `.zip` extraction |
+| `p7zip` | `.7z` extraction |
+| `zstd` | `.zst` / `.tar.zst` extraction |
+
+> `tar`, `gzip`, `bzip2` and `xz` are part of the base system and always present.

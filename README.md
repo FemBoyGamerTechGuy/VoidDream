@@ -51,70 +51,7 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 
 ## Installation
 
-### Arch / Artix
-
-```bash
-# Install Rust if you don't have it
-sudo pacman -S rust
-
-# Clone and build
-git clone https://github.com/FemBoyGamerTechGuy/VoidDream
-cd VoidDream
-cargo build --release
-sudo install -Dm755 target/release/VoidDream /usr/bin/VoidDream
-```
-
-**Optional runtime dependencies:**
-
-```bash
-sudo pacman -S ffmpeg mpv neovim chafa unrar unzip p7zip zstd
-```
-
----
-
-### Fedora
-
-**Install build dependencies first:**
-
-```bash
-sudo dnf install rust cargo pkg-config chafa chafa-devel
-```
-
-> [!WARNING]
-> There may be one additional missing build dependency — this list is not yet complete.
-> If you hit a compile error, please [open an issue](https://github.com/FemBoyGamerTechGuy/VoidDream/issues) with the error output so it can be documented here.
-
-```bash
-git clone https://github.com/FemBoyGamerTechGuy/VoidDream
-cd VoidDream
-cargo build --release
-sudo install -Dm755 target/release/VoidDream /usr/bin/VoidDream
-```
-
-**Optional runtime dependencies:**
-
-```bash
-sudo dnf install ffmpeg mpv neovim chafa unrar unzip p7zip zstd
-```
-
----
-
-### Runtime dependencies
-
-Requires **Rust ≥ 1.85** to build.
-
-| Package  | Purpose                              | Required |
-|----------|--------------------------------------|----------|
-| `ffmpeg` | Video thumbnails                     | Optional |
-| `chafa`  | Image preview fallback               | Optional |
-| `mpv`    | Video / audio playback               | Optional |
-| `nvim`   | Text editor                          | Optional |
-| `unrar`  | `.rar` extraction                    | Optional |
-| `unzip`  | `.zip` extraction                    | Optional |
-| `p7zip`  | `.7z` extraction                     | Optional |
-| `zstd`   | `.zst` / `.tar.zst` extraction       | Optional |
-
-> `tar`, `gzip`, `bzip2` and `xz` are part of the base system and are always present.
+See **[packaging/README.md](packaging/README.md)**.
 
 ---
 
@@ -185,9 +122,10 @@ VoidDream/
 │   └── none.json
 ├── packaging/
 │   ├── README.md
+│   ├── PKGBUILD
 │   ├── build-deb.sh
-│   ├── build-packages.sh
-│   └── build-rpm.sh
+│   ├── build-rpm.sh
+│   └── build-packages.sh
 ├── Previews/
 │   ├── 2026-03-12-220027_hyprshot.png
 │   ├── 2026-03-12-220040_hyprshot.png
@@ -222,6 +160,7 @@ VoidDream/
 ├── CONTRIBUTING.md
 ├── Cargo.toml
 ├── LICENSE
+├── Makefile
 ├── README.md
 └── THEMING.md
 ```
