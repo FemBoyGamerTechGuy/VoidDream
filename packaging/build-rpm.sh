@@ -1,41 +1,94 @@
 #!/usr/bin/env bash
-# build-rpm.sh — Build a .rpm package for NovaDream
-# Requires: cargo-generate-rpm, gtk4-devel, pkg-config
-# Install cargo-generate-rpm: cargo install cargo-generate-rpm
+# Builds an .rpm package for VoidDream.
+# Run from the repo root: bash packaging/build-rpm.sh
+# Requires: rpm-build (sudo dnf install rpm-build)
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$ROOT"
-
-echo "==> Checking dependencies..."
-if ! command -v cargo-generate-rpm &>/dev/null; then
-    echo "cargo-generate-rpm not found. Installing..."
-    cargo install cargo-generate-rpm
-fi
-
-# Icons must exist before packaging
-ICON_256="assets/icons/hicolor/256x256/apps/io.github.FemBoyGamerTechGuy.NovaDream.png"
-if [ ! -f "$ICON_256" ]; then
-    echo "ERROR: Icon not found at $ICON_256"
-    echo "Please add your icons to assets/icons/hicolor/<size>/apps/ before packaging."
-    exit 1
-fi
+PKG_NAME="voiddream"
+PKG_VERSION="0.1.2"
+PKG_RELEASE="1"
+ARCH="$(uname -m)"
+BUILD_ROOT="$(mktemp -d)/rpmbuild"
 
 echo "==> Building release binary..."
 cargo build --release
 
-echo "==> Stripping binary..."
-strip -s target/release/NovaDream
+echo "==> Staging package tree at $BUILD_ROOT..."
 
-echo "==> Building .rpm package..."
-cargo generate-rpm
+# ── Binary ────────────────────────────────────────────────────────────────────
+install -Dm755 target/release/VoidDream \
+    "$BUILD_ROOT/usr/bin/VoidDream"
 
-RPM=$(find target/generate-rpm -name "*.rpm" | head -1)
+# ── Themes ────────────────────────────────────────────────────────────────────
+install -dm755 "$BUILD_ROOT/usr/share/VoidDream/themes"
+install -Dm644 themes/*.json \
+    "$BUILD_ROOT/usr/share/VoidDream/themes/"
+
+# ── Icon sets ─────────────────────────────────────────────────────────────────
+install -dm755 "$BUILD_ROOT/usr/share/VoidDream/icons"
+install -Dm644 icons/*.json \
+    "$BUILD_ROOT/usr/share/VoidDream/icons/"
+
+# ── Desktop entry ─────────────────────────────────────────────────────────────
+install -Dm644 assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
+    "$BUILD_ROOT/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop"
+
+# ── Generate file list for %files section ─────────────────────────────────────
+FILE_LIST=$(find "$BUILD_ROOT" -type f | sed "s|$BUILD_ROOT||")
+
+# ── Write spec file ───────────────────────────────────────────────────────────
+SPEC_FILE="$(mktemp /tmp/voiddream-XXXXXX.spec)"
+cat > "$SPEC_FILE" << SPEC
+Name:       $PKG_NAME
+Version:    $PKG_VERSION
+Release:    $PKG_RELEASE%{?dist}
+Summary:    A dreamy void-themed TUI file manager built with Rust and Ratatui
+License:    GPL-3.0-or-later
+URL:        https://github.com/FemBoyGamerTechGuy/VoidDream
+BuildArch:  $ARCH
+
+Requires:       glibc
+Recommends:     ffmpeg
+Recommends:     mpv
+Recommends:     neovim
+Recommends:     chafa
+Recommends:     unrar
+Recommends:     unzip
+Recommends:     p7zip
+Recommends:     zstd
+
+%description
+VoidDream is a fast, keyboard-driven file manager for the terminal.
+It features a three-pane layout, live file previews, fuzzy search,
+multi-tab navigation, and a fully themeable interface.
+
+%install
+cp -a $BUILD_ROOT/. %{buildroot}/
+
+%files
+/usr/bin/VoidDream
+/usr/share/VoidDream/
+/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop
+
+%changelog
+* $(date "+%a %b %d %Y") FemBoyGamerTechGuy - $PKG_VERSION-$PKG_RELEASE
+- Packaged by build-rpm.sh
+SPEC
+
+# ── Build the RPM ─────────────────────────────────────────────────────────────
+RPM_DIR="$(mktemp -d)"
+RPM_FILE="${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}.${ARCH}.rpm"
+
+echo "==> Building $RPM_FILE..."
+rpmbuild -bb "$SPEC_FILE" \
+    --buildroot "$BUILD_ROOT" \
+    --define "_rpmdir $RPM_DIR" \
+    --define "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
+    --nodebuginfo 2>&1 | tail -5
+
+find "$RPM_DIR" -name "*.rpm" -exec cp {} "./$RPM_FILE" \;
+
 echo ""
-echo "✓ Package built: $RPM"
-echo ""
-echo "Install with:"
-echo "  sudo rpm -i $RPM"
-echo "  # or with dnf:"
-echo "  sudo dnf install $RPM"
+echo "Done: $RPM_FILE"
+echo "Install with: sudo rpm -i $RPM_FILE"
+echo "         or:  sudo dnf install ./$RPM_FILE"

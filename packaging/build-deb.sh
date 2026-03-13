@@ -1,37 +1,59 @@
 #!/usr/bin/env bash
-# build-deb.sh — Build a .deb package for NovaDream
-# Requires: cargo-deb, libgtk-4-dev, pkg-config
-# Install cargo-deb: cargo install cargo-deb
+# Builds a .deb package for VoidDream.
+# Run from the repo root: bash packaging/build-deb.sh
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$ROOT"
-
-echo "==> Checking dependencies..."
-if ! command -v cargo-deb &>/dev/null; then
-    echo "cargo-deb not found. Installing..."
-    cargo install cargo-deb
-fi
-
-# Icons must exist before packaging — placeholder check
-ICON_256="assets/icons/hicolor/256x256/apps/io.github.FemBoyGamerTechGuy.NovaDream.png"
-if [ ! -f "$ICON_256" ]; then
-    echo "ERROR: Icon not found at $ICON_256"
-    echo "Please add your icons to assets/icons/hicolor/<size>/apps/ before packaging."
-    exit 1
-fi
+PKG_NAME="voiddream"
+PKG_VERSION="0.1.2"
+PKG_ARCH="amd64"
+PKG_DIR="$(mktemp -d)/voiddream_${PKG_VERSION}_${PKG_ARCH}"
 
 echo "==> Building release binary..."
 cargo build --release
 
-echo "==> Building .deb package..."
-cargo deb --no-build
+echo "==> Staging package tree..."
 
-DEB=$(find target/debian -name "*.deb" | head -1)
+# ── Binary ────────────────────────────────────────────────────────────────────
+install -Dm755 target/release/VoidDream \
+    "$PKG_DIR/usr/bin/VoidDream"
+
+# ── Themes ────────────────────────────────────────────────────────────────────
+install -dm755 "$PKG_DIR/usr/share/VoidDream/themes"
+install -Dm644 themes/*.json \
+    "$PKG_DIR/usr/share/VoidDream/themes/"
+
+# ── Icon sets ─────────────────────────────────────────────────────────────────
+install -dm755 "$PKG_DIR/usr/share/VoidDream/icons"
+install -Dm644 icons/*.json \
+    "$PKG_DIR/usr/share/VoidDream/icons/"
+
+# ── Desktop entry ─────────────────────────────────────────────────────────────
+install -Dm644 assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
+    "$PKG_DIR/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop"
+
+# ── DEBIAN control ────────────────────────────────────────────────────────────
+install -dm755 "$PKG_DIR/DEBIAN"
+cat > "$PKG_DIR/DEBIAN/control" << EOF
+Package: $PKG_NAME
+Version: $PKG_VERSION
+Architecture: $PKG_ARCH
+Maintainer: FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>
+Description: A dreamy void-themed TUI file manager built with Rust and Ratatui
+ VoidDream is a fast, keyboard-driven file manager for the terminal.
+ It features a three-pane layout, live file previews, fuzzy search,
+ multi-tab navigation, and a fully themeable interface.
+Homepage: https://github.com/FemBoyGamerTechGuy/VoidDream
+Depends: libc6
+Recommends: ffmpeg, mpv, neovim, chafa, unrar, unzip, p7zip-full, zstd
+Section: utils
+Priority: optional
+EOF
+
+# ── Build the .deb ────────────────────────────────────────────────────────────
+DEB_FILE="${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
+echo "==> Building $DEB_FILE..."
+dpkg-deb --build --root-owner-group "$PKG_DIR" "$DEB_FILE"
+
 echo ""
-echo "✓ Package built: $DEB"
-echo ""
-echo "Install with:"
-echo "  sudo dpkg -i $DEB"
-echo "  sudo apt-get install -f   # fix any missing deps"
+echo "Done: $DEB_FILE"
+echo "Install with: sudo dpkg -i $DEB_FILE"

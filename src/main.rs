@@ -6,6 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
+    prelude::StatefulWidget,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -17,12 +18,11 @@ use ratatui_image::{
     protocol::StatefulProtocol,
     StatefulImage,
 };
-use ratatui::widgets::StatefulWidget;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
@@ -30,406 +30,598 @@ use std::{
     env,
 };
 
-// ─── User-defined themes ──────────────────────────────────────────────────────
-/// One user theme, loaded from a single JSON file in
-///   /usr/share/VoidDream/themes/ and ~/.local/share/VoidDream/themes/
-///
-/// Each file in that directory is one theme.
-/// The filename (without the .json extension) becomes the theme name,
-/// so spaces and special characters are fully supported:
-///   "Fire Aura.json"  →  theme name "Fire Aura"
-///   "My Dark.json"    →  theme name "My Dark"
-///
-/// File format (all colours are "#RRGGBB" hex):
-/// {
-///   "base":     "#1e1e2e",
-///   "surface0": "#313244",
-///   "surface1": "#45475a",
-///   "overlay0": "#6c7086",
-///   "text":     "#cdd6f4",
-///   "subtext":  "#a6adc8",
-///   "mauve":    "#cba6f7",
-///   "blue":     "#89b4fa",
-///   "teal":     "#94e2d5",
-///   "green":    "#a6e3a1",
-///   "red":      "#f38ba8",
-///   "yellow":   "#f9e2af",
-///   "pink":     "#f5c2e7"
-/// }
-///
-/// To ADD a theme  → drop a new .json file into the themes directory.
-/// To REMOVE a theme → delete its .json file.
-/// To RENAME a theme → rename the file.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UserThemeColors {
-    pub base:     String,
-    pub surface0: String,
-    pub surface1: String,
-    pub overlay0: String,
-    pub text:     String,
-    pub subtext:  String,
-    pub mauve:    String,
-    pub blue:     String,
-    pub teal:     String,
-    pub green:    String,
-    pub red:      String,
-    pub yellow:   String,
-    pub pink:     String,
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// THEME SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Theme files live in:
+//   /usr/share/VoidDream/themes/<name>.json  — system
+//   ~/.local/share/VoidDream/themes/<name>.json  — user (overrides system)
+//
+// A theme file has two sections:
+//
+//   "palette": { "base": "#1e1e2e", "mantle": "#181825", ... }   — named colors
+//   "roles":   { "bg_primary": "base", "cursor_bg": "mauve", ... } — semantic roles
+//                                                                     values are either a palette key
+//                                                                     or a raw "#RRGGBB" hex string
+//
+// Every role the app uses is listed below in ThemeRoles.  Missing roles fall
+// back to a built-in neutral gray so the app always renders correctly even with
+// an incomplete theme file.
+//
+// PALETTE section is optional — if you omit it you can put raw hex directly in
+// every role value.  Palette is just a named-color shorthand.
+//
+// Example minimal theme:
+// {
+//   "palette": { "bg": "#1e1e2e", "fg": "#cdd6f4", "accent": "#cba6f7" },
+//   "roles": {
+//     "bg_primary":   "bg",     "bg_panel":    "bg",
+//     "bg_popup":     "bg",     "bg_statusbar":"bg",
+//     "bg_tabbar":    "bg",     "bg_selected": "accent",
+//     "fg_primary":   "fg",     "fg_dim":      "fg",
+//     "fg_muted":     "fg",     "fg_cursor":   "bg",
+//     "accent":       "accent", "accent2":     "accent",
+//     "border":       "accent", "border_dim":  "fg",
+//     "warn":         "#f38ba8","ok":          "#a6e3a1",
+//     "kind_dir":     "accent", "kind_image":  "#f5c2e7",
+//     "kind_video":   "accent", "kind_audio":  "accent",
+//     "kind_archive": "#f38ba8","kind_jar":    "#94e2d5",
+//     "kind_doc":     "#f9e2af","kind_code":   "#a6e3a1",
+//     "kind_exec":    "#94e2d5","kind_symlink":"#94e2d5",
+//     "kind_other":   "fg"
+//   }
+// }
+//
+
+/// Raw JSON shape of a theme file.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct ThemeFile {
+    #[serde(default)]
+    palette: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    roles:   std::collections::HashMap<String, String>,
 }
 
-/// A resolved user theme: name (from filename) + parsed colors.
-#[derive(Clone, Debug)]
-pub struct UserThemeEntry {
-    pub name:   String,
-    pub colors: UserThemeColors,
-}
-
-impl UserThemeEntry {
-    /// Directories to scan for themes, in priority order:
-    ///   1. /usr/share/VoidDream/themes/     — system-installed (from package)
-    ///   2. ~/.local/share/VoidDream/themes/ — user themes (override system ones)
-    pub fn theme_dirs() -> Vec<PathBuf> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        vec![
-            PathBuf::from("/usr/share/VoidDream/themes"),
-            PathBuf::from(home).join(".local").join("share").join("VoidDream").join("themes"),
-        ]
+impl ThemeFile {
+    /// Resolve a role value: if it's a palette key, return the hex; else treat as raw hex.
+    fn resolve_color(&self, key: &str) -> Option<Color> {
+        let raw = self.roles.get(key)?;
+        let hex = self.palette.get(raw.as_str()).unwrap_or(raw);
+        Some(parse_hex(hex))
     }
-
-    /// Scan all theme directories and load every *.json file.
-    /// The theme name is the filename stem (e.g. "Fire Aura.json" → "Fire Aura").
-    /// User themes (~/.local) override system themes (/usr/share) with the same name.
-    /// Files that fail to parse are silently skipped.
-    pub fn load_all() -> Vec<Self> {
-        let mut seen: std::collections::HashMap<String, UserThemeEntry> = std::collections::HashMap::new();
-        for dir in Self::theme_dirs() {
-            if !dir.exists() { continue; }
-            if let Ok(entries) = fs::read_dir(&dir) {
-                let mut paths: Vec<PathBuf> = entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-                    .collect();
-                paths.sort();
-                for path in paths {
-                    let name = path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if name.is_empty() { continue; }
-                    if let Ok(text) = fs::read_to_string(&path) {
-                        if let Ok(colors) = serde_json::from_str::<UserThemeColors>(&text) {
-                            // Later dirs (user) override earlier dirs (system)
-                            seen.insert(name.clone(), UserThemeEntry { name, colors });
-                        }
-                    }
-                }
-            }
-        }
-        let mut themes: Vec<Self> = seen.into_values().collect();
-        themes.sort_by(|a, b| a.name.cmp(&b.name));
-        themes
-    }
-
-    /// Parse a "#RRGGBB" string into a ratatui Color.
-    fn parse_hex(s: &str) -> Color {
-        let s = s.trim_start_matches('#');
-        if s.len() == 6 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                u8::from_str_radix(&s[0..2], 16),
-                u8::from_str_radix(&s[2..4], 16),
-                u8::from_str_radix(&s[4..6], 16),
-            ) {
-                return Color::Rgb(r, g, b);
-            }
-        }
-        Color::Reset
-    }
-
-    /// Convert to a runtime Theme.
-    pub fn to_theme(&self) -> Theme {
-        let c = &self.colors;
-        Theme {
-            base:     Self::parse_hex(&c.base),
-            surface0: Self::parse_hex(&c.surface0),
-            surface1: Self::parse_hex(&c.surface1),
-            overlay0: Self::parse_hex(&c.overlay0),
-            text:     Self::parse_hex(&c.text),
-            subtext:  Self::parse_hex(&c.subtext),
-            mauve:    Self::parse_hex(&c.mauve),
-            blue:     Self::parse_hex(&c.blue),
-            teal:     Self::parse_hex(&c.teal),
-            green:    Self::parse_hex(&c.green),
-            red:      Self::parse_hex(&c.red),
-            yellow:   Self::parse_hex(&c.yellow),
-            pink:     Self::parse_hex(&c.pink),
-        }
+    fn rc(&self, key: &str, fallback: Color) -> Color {
+        self.resolve_color(key).unwrap_or(fallback)
     }
 }
 
-// ─── Theme ────────────────────────────────────────────────────────────────────
+/// Returns the XDG data home dir: $XDG_DATA_HOME if set, else ~/.local/share
+fn xdg_data_home() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() { return PathBuf::from(xdg); }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    PathBuf::from(home).join(".local").join("share")
+}
+
+fn parse_hex(s: &str) -> Color {
+    let s = s.trim_start_matches('#');
+    if s.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&s[0..2], 16),
+            u8::from_str_radix(&s[2..4], 16),
+            u8::from_str_radix(&s[4..6], 16),
+        ) { return Color::Rgb(r, g, b); }
+    }
+    Color::Reset
+}
+
+/// Runtime theme — every semantic color role the UI uses.
+/// All fields are resolved Color values; no strings at runtime.
 #[derive(Clone)]
 pub struct Theme {
-    base:     Color, surface0: Color, surface1: Color,
-    overlay0: Color, text:     Color, subtext:  Color,
-    mauve:    Color, blue:     Color, teal:     Color,
-    green:    Color, red:      Color, yellow:   Color,
-    pink:     Color,
+    // Backgrounds
+    pub bg_primary:   Color,  // main pane background
+    pub bg_panel:     Color,  // secondary / side panels
+    pub bg_popup:     Color,  // overlays, dialogs, help
+    pub bg_statusbar: Color,  // bottom status bar
+    pub bg_tabbar:    Color,  // top tab bar
+    pub bg_selected:  Color,  // highlighted / active tab background
+    pub bg_cursor:    Color,  // file list cursor background
+    pub bg_sel_entry: Color,  // multi-selected entry background
+
+    // Foregrounds
+    pub fg_primary:   Color,  // main text
+    pub fg_dim:       Color,  // secondary text / labels
+    pub fg_muted:     Color,  // timestamps, sizes, faint info
+    pub fg_cursor:    Color,  // text on cursor row
+    pub fg_active_tab:Color,  // active tab label text
+
+    // Accents / semantic
+    pub accent:       Color,  // primary accent (cursor fg, active tab, highlights)
+    pub accent2:      Color,  // secondary accent (selection markers, yank count)
+    pub border:       Color,  // active / focused border
+    pub border_dim:   Color,  // inactive border
+    pub warn:         Color,  // errors, deletes
+    pub ok:           Color,  // success, paste confirmation
+
+    // File-kind colors
+    pub kind_dir:     Color,
+    pub kind_image:   Color,
+    pub kind_video:   Color,
+    pub kind_audio:   Color,
+    pub kind_archive: Color,
+    pub kind_jar:     Color,
+    pub kind_doc:     Color,
+    pub kind_code:    Color,
+    pub kind_exec:    Color,
+    pub kind_symlink: Color,
+    pub kind_other:   Color,
 }
 
 impl Theme {
-    /// Resolve a theme by name, checking user themes first, then built-ins.
-    fn resolve(name: &str, user_themes: &[UserThemeEntry]) -> Self {
-        if let Some(ut) = user_themes.iter().find(|t| t.name == name) {
-            return ut.to_theme();
-        }
-        Self::by_name(name)
-    }
-
-    /// All theme names (built-in + user), deduplicated (user wins on collision).
-    fn all_names_merged(user_themes: &[UserThemeEntry]) -> Vec<String> {
-        let mut names: Vec<String> = Self::builtin_names()
-            .iter()
-            .filter(|&&n| !user_themes.iter().any(|u| u.name == n))
-            .map(|&s| s.to_string())
-            .collect();
-        for ut in user_themes {
-            names.push(ut.name.clone());
-        }
-        names
-    }
-
-    fn by_name(name: &str) -> Self {
-        match name {
-            "catppuccin-latte" => Self {
-                base:     Color::Rgb(239,241,245), surface0: Color::Rgb(204,208,218),
-                surface1: Color::Rgb(188,192,204), overlay0: Color::Rgb(156,160,176),
-                text:     Color::Rgb(76,79,105),   subtext:  Color::Rgb(92,95,119),
-                mauve:    Color::Rgb(136,57,239),  blue:     Color::Rgb(30,102,245),
-                teal:     Color::Rgb(23,146,153),  green:    Color::Rgb(64,160,43),
-                red:      Color::Rgb(210,15,57),   yellow:   Color::Rgb(223,142,29),
-                pink:     Color::Rgb(234,118,203),
-            },
-            "catppuccin-frappe" => Self {
-                base:     Color::Rgb(48,52,70),    surface0: Color::Rgb(65,69,89),
-                surface1: Color::Rgb(81,87,109),   overlay0: Color::Rgb(115,121,148),
-                text:     Color::Rgb(198,208,245), subtext:  Color::Rgb(181,191,226),
-                mauve:    Color::Rgb(202,158,230), blue:     Color::Rgb(140,170,238),
-                teal:     Color::Rgb(129,200,190), green:    Color::Rgb(166,209,137),
-                red:      Color::Rgb(231,130,132), yellow:   Color::Rgb(229,200,144),
-                pink:     Color::Rgb(244,184,228),
-            },
-            "catppuccin-mocha" => Self {
-                base:     Color::Rgb(30,30,46),    surface0: Color::Rgb(49,50,68),
-                surface1: Color::Rgb(69,71,90),    overlay0: Color::Rgb(108,112,134),
-                text:     Color::Rgb(205,214,244), subtext:  Color::Rgb(166,173,200),
-                mauve:    Color::Rgb(203,166,247), blue:     Color::Rgb(137,180,250),
-                teal:     Color::Rgb(148,226,213), green:    Color::Rgb(166,227,161),
-                red:      Color::Rgb(243,139,168), yellow:   Color::Rgb(249,226,175),
-                pink:     Color::Rgb(245,194,231),
-            },
-            "tokyo-night" => Self {
-                base:     Color::Rgb(26,27,38),    surface0: Color::Rgb(36,40,59),
-                surface1: Color::Rgb(52,59,88),    overlay0: Color::Rgb(86,95,137),
-                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(169,177,214),
-                mauve:    Color::Rgb(187,154,247), blue:     Color::Rgb(122,162,247),
-                teal:     Color::Rgb(42,195,222),  green:    Color::Rgb(158,206,106),
-                red:      Color::Rgb(247,118,142), yellow:   Color::Rgb(224,175,104),
-                pink:     Color::Rgb(255,121,198),
-            },
-            "tokyo-night-storm" => Self {
-                base:     Color::Rgb(35,38,52),    surface0: Color::Rgb(42,46,62),
-                surface1: Color::Rgb(57,62,80),    overlay0: Color::Rgb(86,95,137),
-                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(169,177,214),
-                mauve:    Color::Rgb(187,154,247), blue:     Color::Rgb(122,162,247),
-                teal:     Color::Rgb(42,195,222),  green:    Color::Rgb(158,206,106),
-                red:      Color::Rgb(247,118,142), yellow:   Color::Rgb(224,175,104),
-                pink:     Color::Rgb(255,121,198),
-            },
-            "tokyo-night-light" => Self {
-                base:     Color::Rgb(213,214,219), surface0: Color::Rgb(195,197,210),
-                surface1: Color::Rgb(180,182,198), overlay0: Color::Rgb(136,139,163),
-                text:     Color::Rgb(52,59,88),    subtext:  Color::Rgb(86,95,137),
-                mauve:    Color::Rgb(122,78,203),  blue:     Color::Rgb(52,101,196),
-                teal:     Color::Rgb(0,150,170),   green:    Color::Rgb(74,153,46),
-                red:      Color::Rgb(194,48,74),   yellow:   Color::Rgb(143,110,37),
-                pink:     Color::Rgb(175,65,148),
-            },
-            "gruvbox-dark" => Self {
-                base:     Color::Rgb(40,40,40),    surface0: Color::Rgb(60,56,54),
-                surface1: Color::Rgb(80,73,69),    overlay0: Color::Rgb(124,111,100),
-                text:     Color::Rgb(235,219,178), subtext:  Color::Rgb(213,196,161),
-                mauve:    Color::Rgb(211,134,155), blue:     Color::Rgb(131,165,152),
-                teal:     Color::Rgb(142,192,124), green:    Color::Rgb(184,187,38),
-                red:      Color::Rgb(251,73,52),   yellow:   Color::Rgb(250,189,47),
-                pink:     Color::Rgb(211,134,155),
-            },
-            "gruvbox-light" => Self {
-                base:     Color::Rgb(251,241,199), surface0: Color::Rgb(235,219,178),
-                surface1: Color::Rgb(213,196,161), overlay0: Color::Rgb(189,174,147),
-                text:     Color::Rgb(60,56,54),    subtext:  Color::Rgb(80,73,69),
-                mauve:    Color::Rgb(143,63,113),  blue:     Color::Rgb(69,133,136),
-                teal:     Color::Rgb(121,116,14),  green:    Color::Rgb(121,116,14),
-                red:      Color::Rgb(204,36,29),   yellow:   Color::Rgb(215,153,33),
-                pink:     Color::Rgb(143,63,113),
-            },
-            "nord" => Self {
-                base:     Color::Rgb(46,52,64),    surface0: Color::Rgb(59,66,82),
-                surface1: Color::Rgb(67,76,94),    overlay0: Color::Rgb(76,86,106),
-                text:     Color::Rgb(236,239,244), subtext:  Color::Rgb(229,233,240),
-                mauve:    Color::Rgb(180,142,173), blue:     Color::Rgb(136,192,208),
-                teal:     Color::Rgb(143,188,187), green:    Color::Rgb(163,190,140),
-                red:      Color::Rgb(191,97,106),  yellow:   Color::Rgb(235,203,139),
-                pink:     Color::Rgb(180,142,173),
-            },
-            "dracula" => Self {
-                base:     Color::Rgb(40,42,54),    surface0: Color::Rgb(50,52,65),
-                surface1: Color::Rgb(68,71,90),    overlay0: Color::Rgb(98,114,164),
-                text:     Color::Rgb(248,248,242), subtext:  Color::Rgb(191,192,197),
-                mauve:    Color::Rgb(189,147,249), blue:     Color::Rgb(139,233,253),
-                teal:     Color::Rgb(80,250,123),  green:    Color::Rgb(80,250,123),
-                red:      Color::Rgb(255,85,85),   yellow:   Color::Rgb(241,250,140),
-                pink:     Color::Rgb(255,121,198),
-            },
-            "rose-pine" => Self {
-                base:     Color::Rgb(25,23,36),    surface0: Color::Rgb(31,29,46),
-                surface1: Color::Rgb(38,35,58),    overlay0: Color::Rgb(110,106,134),
-                text:     Color::Rgb(224,222,244), subtext:  Color::Rgb(144,140,170),
-                mauve:    Color::Rgb(196,167,231), blue:     Color::Rgb(156,207,216),
-                teal:     Color::Rgb(156,207,216), green:    Color::Rgb(156,207,216),
-                red:      Color::Rgb(235,111,146), yellow:   Color::Rgb(246,193,119),
-                pink:     Color::Rgb(235,111,146),
-            },
-            "rose-pine-moon" => Self {
-                base:     Color::Rgb(35,33,54),    surface0: Color::Rgb(42,39,63),
-                surface1: Color::Rgb(57,53,82),    overlay0: Color::Rgb(110,106,134),
-                text:     Color::Rgb(224,222,244), subtext:  Color::Rgb(144,140,170),
-                mauve:    Color::Rgb(196,167,231), blue:     Color::Rgb(156,207,216),
-                teal:     Color::Rgb(156,207,216), green:    Color::Rgb(156,207,216),
-                red:      Color::Rgb(235,111,146), yellow:   Color::Rgb(246,193,119),
-                pink:     Color::Rgb(235,111,146),
-            },
-            "rose-pine-dawn" => Self {
-                base:     Color::Rgb(250,244,237), surface0: Color::Rgb(242,233,222),
-                surface1: Color::Rgb(233,220,204), overlay0: Color::Rgb(152,147,165),
-                text:     Color::Rgb(87,82,121),   subtext:  Color::Rgb(121,117,147),
-                mauve:    Color::Rgb(144,122,169), blue:     Color::Rgb(86,148,159),
-                teal:     Color::Rgb(86,148,159),  green:    Color::Rgb(86,148,159),
-                red:      Color::Rgb(180,99,122),  yellow:   Color::Rgb(234,157,52),
-                pink:     Color::Rgb(180,99,122),
-            },
-            "onedark" => Self {
-                base:     Color::Rgb(40,44,52),    surface0: Color::Rgb(49,53,63),
-                surface1: Color::Rgb(57,62,73),    overlay0: Color::Rgb(92,99,112),
-                text:     Color::Rgb(171,178,191), subtext:  Color::Rgb(152,159,172),
-                mauve:    Color::Rgb(198,120,221), blue:     Color::Rgb(97,175,239),
-                teal:     Color::Rgb(86,182,194),  green:    Color::Rgb(152,195,121),
-                red:      Color::Rgb(224,108,117), yellow:   Color::Rgb(229,192,123),
-                pink:     Color::Rgb(198,120,221),
-            },
-            "solarized-dark" => Self {
-                base:     Color::Rgb(0,43,54),     surface0: Color::Rgb(7,54,66),
-                surface1: Color::Rgb(88,110,117),  overlay0: Color::Rgb(101,123,131),
-                text:     Color::Rgb(253,246,227), subtext:  Color::Rgb(238,232,213),
-                mauve:    Color::Rgb(108,113,196), blue:     Color::Rgb(38,139,210),
-                teal:     Color::Rgb(42,161,152),  green:    Color::Rgb(133,153,0),
-                red:      Color::Rgb(220,50,47),   yellow:   Color::Rgb(181,137,0),
-                pink:     Color::Rgb(211,54,130),
-            },
-            "solarized-light" => Self {
-                base:     Color::Rgb(253,246,227), surface0: Color::Rgb(238,232,213),
-                surface1: Color::Rgb(214,210,196), overlay0: Color::Rgb(147,161,161),
-                text:     Color::Rgb(7,54,66),     subtext:  Color::Rgb(88,110,117),
-                mauve:    Color::Rgb(108,113,196), blue:     Color::Rgb(38,139,210),
-                teal:     Color::Rgb(42,161,152),  green:    Color::Rgb(133,153,0),
-                red:      Color::Rgb(220,50,47),   yellow:   Color::Rgb(181,137,0),
-                pink:     Color::Rgb(211,54,130),
-            },
-            "material-ocean" => Self {
-                base:     Color::Rgb(15,17,26),    surface0: Color::Rgb(27,30,44),
-                surface1: Color::Rgb(36,40,59),    overlay0: Color::Rgb(84,91,130),
-                text:     Color::Rgb(192,202,245), subtext:  Color::Rgb(137,148,196),
-                mauve:    Color::Rgb(199,146,234), blue:     Color::Rgb(130,170,255),
-                teal:     Color::Rgb(137,221,255), green:    Color::Rgb(195,232,141),
-                red:      Color::Rgb(255,85,114),  yellow:   Color::Rgb(255,203,107),
-                pink:     Color::Rgb(199,146,234),
-            },
-            "everforest-dark" => Self {
-                base:     Color::Rgb(35,38,33),    surface0: Color::Rgb(45,50,42),
-                surface1: Color::Rgb(57,62,51),    overlay0: Color::Rgb(131,139,117),
-                text:     Color::Rgb(211,198,170), subtext:  Color::Rgb(157,151,132),
-                mauve:    Color::Rgb(214,153,182), blue:     Color::Rgb(127,187,179),
-                teal:     Color::Rgb(131,192,170), green:    Color::Rgb(167,192,128),
-                red:      Color::Rgb(230,126,128), yellow:   Color::Rgb(219,188,127),
-                pink:     Color::Rgb(214,153,182),
-            },
-            "kanagawa" => Self {
-                base:     Color::Rgb(22,22,29),    surface0: Color::Rgb(31,31,40),
-                surface1: Color::Rgb(42,42,54),    overlay0: Color::Rgb(84,84,109),
-                text:     Color::Rgb(220,215,186), subtext:  Color::Rgb(150,147,125),
-                mauve:    Color::Rgb(152,110,175), blue:     Color::Rgb(125,167,216),
-                teal:     Color::Rgb(106,153,153), green:    Color::Rgb(118,148,106),
-                red:      Color::Rgb(196,95,106),  yellow:   Color::Rgb(195,171,97),
-                pink:     Color::Rgb(210,126,153),
-            },
-            "ayu-dark" => Self {
-                base:     Color::Rgb(13,17,23),    surface0: Color::Rgb(20,25,33),
-                surface1: Color::Rgb(30,37,48),    overlay0: Color::Rgb(72,82,99),
-                text:     Color::Rgb(203,214,226), subtext:  Color::Rgb(131,148,168),
-                mauve:    Color::Rgb(213,121,255), blue:     Color::Rgb(83,154,252),
-                teal:     Color::Rgb(149,230,203), green:    Color::Rgb(186,230,126),
-                red:      Color::Rgb(255,51,51),   yellow:   Color::Rgb(255,180,84),
-                pink:     Color::Rgb(255,130,200),
-            },
-            // default: catppuccin-macchiato
-            _ => Self {
-                base:     Color::Rgb(30,32,48),    surface0: Color::Rgb(54,58,79),
-                surface1: Color::Rgb(73,77,100),   overlay0: Color::Rgb(110,115,141),
-                text:     Color::Rgb(202,211,245), subtext:  Color::Rgb(165,173,203),
-                mauve:    Color::Rgb(198,160,246), blue:     Color::Rgb(138,173,244),
-                teal:     Color::Rgb(139,213,202), green:    Color::Rgb(166,218,149),
-                red:      Color::Rgb(237,135,150), yellow:   Color::Rgb(238,212,159),
-                pink:     Color::Rgb(245,189,230),
-            },
+    /// Neutral fallback — pure gray scale, works on any terminal.
+    /// Hardcoded fallback used when no theme JSON is found.
+    fn neutral() -> Self {
+        // catppuccin-macchiato palette
+        let base     = Color::Rgb(36,  39,  58);   // #24273a
+        let surface0 = Color::Rgb(54,  58,  79);   // #363a4f
+        let surface1 = Color::Rgb(73,  77, 100);   // #494d64
+        let overlay0 = Color::Rgb(110, 115, 141);  // #6e738d
+        let text     = Color::Rgb(202, 211, 245);  // #cad3f5
+        let subtext  = Color::Rgb(165, 173, 203);  // #a5adcb
+        let mauve    = Color::Rgb(198, 160, 246);  // #c6a0f6
+        let blue     = Color::Rgb(138, 173, 244);  // #8aadf4
+        let teal     = Color::Rgb(139, 213, 202);  // #8bd5ca
+        let sapphire = Color::Rgb(125, 196, 228);  // #7dc4e4
+        let green    = Color::Rgb(166, 218, 149);  // #a6da95
+        let red      = Color::Rgb(237, 135, 150);  // #ed8796
+        let yellow   = Color::Rgb(238, 212, 159);  // #eed49f
+        let pink     = Color::Rgb(245, 189, 230);  // #f5bde6
+        Self {
+            bg_primary:   base,     bg_panel:      surface0, bg_popup:     surface1,
+            bg_statusbar: Color::Rgb(30, 32, 48),  // #1e2030 mantle
+            bg_tabbar:    Color::Rgb(24, 25, 38),  // #181926 crust
+            bg_selected:  mauve,    bg_cursor:     mauve,    bg_sel_entry: surface0,
+            fg_primary:   text,     fg_dim:        subtext,  fg_muted:     overlay0,
+            fg_cursor:    base,     fg_active_tab: base,
+            accent:       mauve,    accent2:       yellow,
+            border:       blue,     border_dim:    surface1,
+            warn:         red,      ok:            green,
+            kind_dir:     blue,     kind_image:    pink,
+            kind_video:   mauve,    kind_audio:    mauve,
+            kind_archive: red,      kind_jar:      teal,
+            kind_doc:     yellow,   kind_code:     green,
+            kind_exec:    teal,     kind_symlink:  sapphire,
+            kind_other:   text,
         }
     }
 
-    fn builtin_names() -> &'static [&'static str] {
-        &[
-            "catppuccin-macchiato", "catppuccin-latte", "catppuccin-frappe", "catppuccin-mocha",
-            "tokyo-night", "tokyo-night-storm", "tokyo-night-light",
-            "gruvbox-dark", "gruvbox-light",
-            "nord", "dracula",
-            "rose-pine", "rose-pine-moon", "rose-pine-dawn",
-            "onedark",
-            "solarized-dark", "solarized-light",
-            "material-ocean", "everforest-dark",
-            "kanagawa", "ayu-dark",
+    /// Build a Theme from a parsed ThemeFile, falling back to neutral for missing roles.
+    fn from_file(tf: &ThemeFile) -> Self {
+        let n = Self::neutral();
+        Self {
+            bg_primary:    tf.rc("bg_primary",    n.bg_primary),
+            bg_panel:      tf.rc("bg_panel",       n.bg_panel),
+            bg_popup:      tf.rc("bg_popup",       n.bg_popup),
+            bg_statusbar:  tf.rc("bg_statusbar",   n.bg_statusbar),
+            bg_tabbar:     tf.rc("bg_tabbar",      n.bg_tabbar),
+            bg_selected:   tf.rc("bg_selected",    n.bg_selected),
+            bg_cursor:     tf.rc("bg_cursor",      n.bg_cursor),
+            bg_sel_entry:  tf.rc("bg_sel_entry",   n.bg_sel_entry),
+            fg_primary:    tf.rc("fg_primary",     n.fg_primary),
+            fg_dim:        tf.rc("fg_dim",         n.fg_dim),
+            fg_muted:      tf.rc("fg_muted",       n.fg_muted),
+            fg_cursor:     tf.rc("fg_cursor",      n.fg_cursor),
+            fg_active_tab: tf.rc("fg_active_tab",  n.fg_active_tab),
+            accent:        tf.rc("accent",         n.accent),
+            accent2:       tf.rc("accent2",        n.accent2),
+            border:        tf.rc("border",         n.border),
+            border_dim:    tf.rc("border_dim",     n.border_dim),
+            warn:          tf.rc("warn",           n.warn),
+            ok:            tf.rc("ok",             n.ok),
+            kind_dir:      tf.rc("kind_dir",       n.kind_dir),
+            kind_image:    tf.rc("kind_image",     n.kind_image),
+            kind_video:    tf.rc("kind_video",     n.kind_video),
+            kind_audio:    tf.rc("kind_audio",     n.kind_audio),
+            kind_archive:  tf.rc("kind_archive",   n.kind_archive),
+            kind_jar:      tf.rc("kind_jar",       n.kind_jar),
+            kind_doc:      tf.rc("kind_doc",       n.kind_doc),
+            kind_code:     tf.rc("kind_code",      n.kind_code),
+            kind_exec:     tf.rc("kind_exec",      n.kind_exec),
+            kind_symlink:  tf.rc("kind_symlink",   n.kind_symlink),
+            kind_other:    tf.rc("kind_other",     n.kind_other),
+        }
+    }
+
+    /// Scan theme dirs and return all available theme names.
+    pub fn theme_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/usr/share/VoidDream/themes"),
+            xdg_data_home().join("VoidDream").join("themes"),
         ]
     }
-}
 
-// ─── Icon sets ────────────────────────────────────────────────────────────────
-#[derive(Clone, PartialEq)]
-enum IconSet { NerdFont, Emoji, Minimal, None }
+    pub fn installed_names() -> Vec<String> {
+        let mut seen = std::collections::HashMap::<String,()>::new();
+        for dir in Self::theme_dirs() {
+            if !dir.exists() { continue; }
+            if let Ok(rd) = fs::read_dir(&dir) {
+                let mut names: Vec<String> = rd
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+                    .collect();
+                names.sort();
+                for n in names { seen.insert(n, ()); }
+            }
+        }
+        let mut v: Vec<String> = seen.into_keys().collect();
+        v.sort();
+        v
+    }
 
-impl IconSet {
-    fn by_name(name: &str) -> Self {
-        match name {
-            "emoji"   => Self::Emoji,
-            "minimal" => Self::Minimal,
-            "none"    => Self::None,
-            _         => Self::NerdFont,
+    /// Load a theme by name, scanning system then user dirs (user wins).
+    pub fn load(name: &str) -> Self {
+        let filename = format!("{}.json", name);
+        let mut result: Option<ThemeFile> = None;
+        for dir in Self::theme_dirs() {
+            let path = dir.join(&filename);
+            if let Ok(text) = fs::read_to_string(&path) {
+                let text = text.trim_start_matches('\u{feff}');
+                if let Ok(tf) = serde_json::from_str::<ThemeFile>(text) {
+                    result = Some(tf);
+                }
+            }
+        }
+        match result {
+            Some(tf) => Self::from_file(&tf),
+            None     => Self::neutral(),
         }
     }
 }
 
+fn kind_color(k: &FileKind, t: &Theme) -> Color {
+    match k {
+        FileKind::Dir     => t.kind_dir,
+        FileKind::Image   => t.kind_image,
+        FileKind::Video   => t.kind_video,
+        FileKind::Audio   => t.kind_audio,
+        FileKind::Archive => t.kind_archive,
+        FileKind::Jar     => t.kind_jar,
+        FileKind::Doc     => t.kind_doc,
+        FileKind::Code    => t.kind_code,
+        FileKind::Exec    => t.kind_exec,
+        FileKind::Symlink => t.kind_symlink,
+        FileKind::Other   => t.kind_other,
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ICON SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// Icon files live in:
+//   /usr/share/VoidDream/icons/<name>.json
+//   ~/.local/share/VoidDream/icons/<name>.json   (overrides system)
+//
+// Full JSON schema:
+// {
+//   "dir":     "",  "symlink": "󰌷",  "image": "",  "video": "",
+//   "audio":   "",  "archive": "",  "jar":   "",  "doc":   "",
+//   "code":    "",  "exec":    "",  "other": "",
+//
+//   "by_name": { "dockerfile": "", ".gitignore": "", ... },
+//   "by_ext":  { "rs": "", "py": "", "js": "", ... },
+//   "named_dirs": { ".config": "", "downloads": "", ... },
+//
+//   "chrome": {
+//     "tab_sep":        "",   -- separator between tabs
+//     "clock":          "",   -- clock icon
+//     "calendar":       "",   -- calendar/date icon
+//     "cursor_arrow":   "",   -- selection cursor arrow
+//     "yank_icon":      "",   -- yank count indicator
+//     "sel_icon":       "",   -- selection count indicator
+//     "dir_icon":       "",   -- files-pane border title folder icon
+//     "no_image":       "",   -- shown when terminal can't display images
+//     "progress_fill":  "█",  -- progress bar fill char
+//     "done_icon":      "",   -- extraction done icon
+//     "eta_icon":       "",   -- ETA icon in progress
+//     "arrow_icon":     "",   -- forward arrow in progress
+//     "help_icon":      "?",  -- help overlay title icon
+//     "nav_icon":       "",   -- help nav section icon
+//     "ops_icon":       "",   -- help file ops section icon
+//     "tab_icon":       "",   -- help tabs section icon
+//     "rename_icon":    "",   -- rename mode pill icon
+//     "newfile_icon":   "",   -- new file mode pill icon
+//     "newdir_icon":    "",   -- new directory mode pill icon
+//     "search_icon":    "",   -- fuzzy search title icon
+//     "terminal_icon":  "",   -- terminal/shell indicator
+//     "settings_icon":  "",   -- settings section icon
+//     "search_sec_icon":"",   -- settings search section icon
+//     "cursor_block":   "█"   -- text cursor block character
+//   }
+// }
+//
+
+/// The Chrome struct holds every UI glyph the TUI uses outside of file icons.
+/// This lets icon sets swap between NerdFont glyphs, emoji, ASCII, or anything.
+#[derive(Clone, Debug)]
+pub struct Chrome {
+    pub tab_sep:        String,  // separator between tabs (powerline arrow etc)
+    pub clock:          String,  // clock icon
+    pub calendar:       String,  // date/calendar icon
+    pub cursor_arrow:   String,  // list cursor arrow
+    pub yank_icon:      String,  // yank buffer count icon
+    pub sel_icon:       String,  // multi-selection count icon
+    pub dir_icon:       String,  // folder icon in pane title
+    pub no_image:       String,  // "can't show image" placeholder
+    pub progress_fill:  String,  // progress bar fill character
+    pub done_icon:      String,  // extraction done
+    pub eta_icon:       String,  // clock in ETA display
+    pub arrow_icon:     String,  // forward arrow in ETA display
+    pub help_icon:      String,  // help overlay title
+    pub nav_icon:       String,  // help nav section header
+    pub ops_icon:       String,  // help file ops section header
+    pub tab_sec_icon:   String,  // help tabs section header
+    pub rename_icon:    String,  // rename mode pill
+    pub newfile_icon:   String,  // new file mode pill
+    pub newdir_icon:    String,  // new directory mode pill
+    pub search_icon:    String,  // fuzzy search overlay title
+    pub terminal_icon:  String,  // terminal/exec indicator in run-args
+    pub settings_icon:  String,  // settings section decoration
+    pub search_sec_icon:String,  // settings fuzzy section icon
+    pub cursor_block:   String,  // text cursor character
+}
+
+impl Default for Chrome {
+    /// ASCII-safe fallback — works on any terminal without special fonts.
+    fn default() -> Self {
+        Self {
+            tab_sep:         "|".into(),
+            clock:           "[T]".into(),
+            calendar:        "[D]".into(),
+            cursor_arrow:    ">".into(),
+            yank_icon:       "[Y]".into(),
+            sel_icon:        "[S]".into(),
+            dir_icon:        "/".into(),
+            no_image:        "(no image)".into(),
+            progress_fill:   "#".into(),
+            done_icon:       "[OK]".into(),
+            eta_icon:        "[T]".into(),
+            arrow_icon:      "->".into(),
+            help_icon:       "?".into(),
+            nav_icon:        "[nav]".into(),
+            ops_icon:        "[ops]".into(),
+            tab_sec_icon:    "[tab]".into(),
+            rename_icon:     "[R]".into(),
+            newfile_icon:    "[F]".into(),
+            newdir_icon:     "[D]".into(),
+            search_icon:     "[/]".into(),
+            terminal_icon:   ">_".into(),
+            settings_icon:   "[*]".into(),
+            search_sec_icon: "[/]".into(),
+            cursor_block:    "\u{2588}".into(),
+        }
+    }
+}
+
+/// Runtime icon set — all data driven from a JSON file.
+#[derive(Clone, Debug, Default)]
+pub struct IconData {
+    // kind fallbacks
+    pub dir:     Option<String>,
+    pub symlink: Option<String>,
+    pub image:   Option<String>,
+    pub video:   Option<String>,
+    pub audio:   Option<String>,
+    pub archive: Option<String>,
+    pub jar:     Option<String>,
+    pub doc:     Option<String>,
+    pub code:    Option<String>,
+    pub exec:    Option<String>,
+    pub other:   Option<String>,
+    // lookup tables
+    pub by_name:    std::collections::HashMap<String, String>,
+    pub by_ext:     std::collections::HashMap<String, String>,
+    pub named_dirs: std::collections::HashMap<String, String>,
+    // UI chrome
+    pub chrome: Chrome,
+}
+
+/// Raw JSON shape — all fields optional so partial files are fine.
+#[derive(Deserialize, Default)]
+struct IconJson {
+    dir:     Option<String>,
+    symlink: Option<String>,
+    image:   Option<String>,
+    video:   Option<String>,
+    audio:   Option<String>,
+    archive: Option<String>,
+    jar:     Option<String>,
+    doc:     Option<String>,
+    code:    Option<String>,
+    exec:    Option<String>,
+    other:   Option<String>,
+    #[serde(default)] by_name:    std::collections::HashMap<String, String>,
+    #[serde(default)] by_ext:     std::collections::HashMap<String, String>,
+    #[serde(default)] named_dirs: std::collections::HashMap<String, String>,
+    #[serde(default)] chrome:     ChromeJson,
+}
+
+#[derive(Deserialize, Default)]
+struct ChromeJson {
+    tab_sep:         Option<String>,
+    clock:           Option<String>,
+    calendar:        Option<String>,
+    cursor_arrow:    Option<String>,
+    yank_icon:       Option<String>,
+    sel_icon:        Option<String>,
+    dir_icon:        Option<String>,
+    no_image:        Option<String>,
+    progress_fill:   Option<String>,
+    done_icon:       Option<String>,
+    eta_icon:        Option<String>,
+    arrow_icon:      Option<String>,
+    help_icon:       Option<String>,
+    nav_icon:        Option<String>,
+    ops_icon:        Option<String>,
+    tab_sec_icon:    Option<String>,
+    rename_icon:     Option<String>,
+    newfile_icon:    Option<String>,
+    newdir_icon:     Option<String>,
+    search_icon:     Option<String>,
+    terminal_icon:   Option<String>,
+    settings_icon:   Option<String>,
+    search_sec_icon: Option<String>,
+    cursor_block:    Option<String>,
+}
+
+impl ChromeJson {
+    fn into_chrome(self) -> Chrome {
+        let d = Chrome::default();
+        Chrome {
+            tab_sep:         self.tab_sep.unwrap_or(d.tab_sep),
+            clock:           self.clock.unwrap_or(d.clock),
+            calendar:        self.calendar.unwrap_or(d.calendar),
+            cursor_arrow:    self.cursor_arrow.unwrap_or(d.cursor_arrow),
+            yank_icon:       self.yank_icon.unwrap_or(d.yank_icon),
+            sel_icon:        self.sel_icon.unwrap_or(d.sel_icon),
+            dir_icon:        self.dir_icon.unwrap_or(d.dir_icon),
+            no_image:        self.no_image.unwrap_or(d.no_image),
+            progress_fill:   self.progress_fill.unwrap_or(d.progress_fill),
+            done_icon:       self.done_icon.unwrap_or(d.done_icon),
+            eta_icon:        self.eta_icon.unwrap_or(d.eta_icon),
+            arrow_icon:      self.arrow_icon.unwrap_or(d.arrow_icon),
+            help_icon:       self.help_icon.unwrap_or(d.help_icon),
+            nav_icon:        self.nav_icon.unwrap_or(d.nav_icon),
+            ops_icon:        self.ops_icon.unwrap_or(d.ops_icon),
+            tab_sec_icon:    self.tab_sec_icon.unwrap_or(d.tab_sec_icon),
+            rename_icon:     self.rename_icon.unwrap_or(d.rename_icon),
+            newfile_icon:    self.newfile_icon.unwrap_or(d.newfile_icon),
+            newdir_icon:     self.newdir_icon.unwrap_or(d.newdir_icon),
+            search_icon:     self.search_icon.unwrap_or(d.search_icon),
+            terminal_icon:   self.terminal_icon.unwrap_or(d.terminal_icon),
+            settings_icon:   self.settings_icon.unwrap_or(d.settings_icon),
+            search_sec_icon: self.search_sec_icon.unwrap_or(d.search_sec_icon),
+            cursor_block:    self.cursor_block.unwrap_or(d.cursor_block),
+        }
+    }
+}
+
+impl IconData {
+    fn icon_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/usr/share/VoidDream/icons"),
+            xdg_data_home().join("VoidDream").join("icons"),
+        ]
+    }
+
+    pub fn installed_names() -> Vec<String> {
+        let mut seen = std::collections::HashMap::<String,()>::new();
+        for dir in Self::icon_dirs() {
+            if !dir.exists() { continue; }
+            if let Ok(rd) = fs::read_dir(&dir) {
+                let mut names: Vec<String> = rd
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                    .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+                    .collect();
+                names.sort();
+                for n in names { seen.insert(n, ()); }
+            }
+        }
+        let mut v: Vec<String> = seen.into_keys().collect();
+        v.sort();
+        v
+    }
+
+    /// Load an icon set by name.  Later dirs (user) override earlier (system).
+    pub fn load(name: &str) -> Self {
+        let filename = format!("{}.json", name);
+        let mut result: Option<IconJson> = None;
+        for dir in Self::icon_dirs() {
+            let path = dir.join(&filename);
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(ij) = serde_json::from_str::<IconJson>(&text) {
+                    result = Some(ij);
+                }
+            }
+        }
+        match result {
+            None => IconData::default(),
+            Some(ij) => IconData {
+                dir:     ij.dir,
+                symlink: ij.symlink,
+                image:   ij.image,
+                video:   ij.video,
+                audio:   ij.audio,
+                archive: ij.archive,
+                jar:     ij.jar,
+                doc:     ij.doc,
+                code:    ij.code,
+                exec:    ij.exec,
+                other:   ij.other,
+                by_name:    ij.by_name,
+                by_ext:     ij.by_ext,
+                named_dirs: ij.named_dirs,
+                chrome:     ij.chrome.into_chrome(),
+            },
+        }
+    }
+
+    /// Resolve icon for a given file path + kind.
+    /// Priority: by_name > named_dirs (for dirs) > by_ext > kind fallback
+    pub(crate) fn file_icon<'a>(&'a self, path: &Path, kind: &FileKind) -> &'a str {
+        let name = path.file_name().and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase()).unwrap_or_default();
+        let ext  = path.extension().and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase()).unwrap_or_default();
+
+        // 1. Exact filename match
+        if let Some(ic) = self.by_name.get(name.as_str()) { return ic.as_str(); }
+
+        // 2. Directory → named_dirs lookup
+        if *kind == FileKind::Dir {
+            if let Some(ic) = self.named_dirs.get(name.as_str()) { return ic.as_str(); }
+            return self.dir.as_deref().unwrap_or("");
+        }
+
+        // 3. Symlink
+        if *kind == FileKind::Symlink {
+            return self.symlink.as_deref().unwrap_or("");
+        }
+
+        // 4. Extension match
+        if !ext.is_empty() {
+            if let Some(ic) = self.by_ext.get(ext.as_str()) { return ic.as_str(); }
+        }
+
+        // 5. Kind fallback
+        match kind {
+            FileKind::Image   => self.image.as_deref().unwrap_or(""),
+            FileKind::Video   => self.video.as_deref().unwrap_or(""),
+            FileKind::Audio   => self.audio.as_deref().unwrap_or(""),
+            FileKind::Archive => self.archive.as_deref().unwrap_or(""),
+            FileKind::Jar     => self.jar.as_deref().unwrap_or(""),
+            FileKind::Doc     => self.doc.as_deref().unwrap_or(""),
+            FileKind::Code    => self.code.as_deref().unwrap_or(""),
+            FileKind::Exec    => self.exec.as_deref().unwrap_or(""),
+            FileKind::Other   => self.other.as_deref().unwrap_or(""),
+            _                 => "",
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STYLE HELPERS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 fn st(fg: Color) -> Style { Style::default().fg(fg) }
 fn st_bg(fg: Color, bg: Color) -> Style { Style::default().fg(fg).bg(bg) }
 fn bold(fg: Color) -> Style { Style::default().fg(fg).add_modifier(Modifier::BOLD) }
 fn bold_bg(fg: Color, bg: Color) -> Style {
     Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
 }
-
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -444,7 +636,8 @@ pub struct Config {
     pub opener_audio:      String,
     pub opener_doc:        String,
     pub opener_editor:     String,
-    pub opener_archive:    String,
+    pub opener_jar:        String,
+    pub opener_terminal:   String,
     pub key_copy:          String,
     pub key_cut:           String,
     pub key_paste:         String,
@@ -472,7 +665,9 @@ impl Default for Config {
             theme: "catppuccin-macchiato".into(), icon_set: "nerdfont".into(),
             opener_image: "mirage".into(), opener_video: "mpv".into(),
             opener_audio: "mpv".into(), opener_doc: "libreoffice".into(),
-            opener_editor: "nvim".into(), opener_archive: String::new(),
+            opener_editor: "nvim".into(),
+            opener_jar: "java -jar".into(),
+            opener_terminal: "kitty".into(),
             key_copy: "c".into(), key_cut: "u".into(), key_paste: "p".into(),
             key_delete: "d".into(), key_rename: "r".into(),
             key_new_file: "f".into(), key_new_dir: "m".into(),
@@ -488,8 +683,13 @@ impl Default for Config {
 
 impl Config {
     fn config_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-        PathBuf::from(home).join(".config").join("VoidDream").join("config.json")
+        let cfg_home = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            if !xdg.is_empty() { PathBuf::from(xdg) }
+            else { PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into())).join(".config") }
+        } else {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into())).join(".config")
+        };
+        cfg_home.join("VoidDream").join("config.json")
     }
     fn load() -> Self {
         let p = Self::config_path();
@@ -513,6 +713,7 @@ const IMAGE_EXT:   &[&str] = &["png","jpg","jpeg","gif","bmp","webp","svg","ico"
 const VIDEO_EXT:   &[&str] = &["mp4","mkv","avi","mov","webm","flv","wmv","m4v","mpg","mpeg"];
 const AUDIO_EXT:   &[&str] = &["mp3","flac","ogg","wav","aac","m4a","opus","wma"];
 const ARCHIVE_EXT: &[&str] = &["zip","tar","gz","bz2","xz","7z","rar","zst","tgz","tbz2"];
+const JAR_EXT:     &[&str] = &["jar","war","ear"];
 const DOC_EXT:     &[&str] = &["pdf","doc","docx","odt","xls","xlsx","ods","ppt","pptx","odp"];
 const CODE_EXT:    &[&str] = &[
     "py","js","ts","rs","go","c","cpp","h","java","rb","php",
@@ -522,7 +723,7 @@ const CODE_EXT:    &[&str] = &[
 ];
 
 #[derive(Clone, PartialEq)]
-enum FileKind { Dir, Image, Video, Audio, Archive, Doc, Code, Exec, Symlink, Other }
+pub(crate) enum FileKind { Dir, Image, Video, Audio, Archive, Jar, Doc, Code, Exec, Symlink, Other }
 
 fn file_kind(path: &Path) -> FileKind {
     if path.is_symlink() { return FileKind::Symlink; }
@@ -533,6 +734,7 @@ fn file_kind(path: &Path) -> FileKind {
     if VIDEO_EXT.contains(&ext)   { return FileKind::Video; }
     if AUDIO_EXT.contains(&ext)   { return FileKind::Audio; }
     if ARCHIVE_EXT.contains(&ext) { return FileKind::Archive; }
+    if JAR_EXT.contains(&ext)     { return FileKind::Jar; }
     if DOC_EXT.contains(&ext)     { return FileKind::Doc; }
     if CODE_EXT.contains(&ext)    { return FileKind::Code; }
     #[cfg(unix)] {
@@ -542,145 +744,6 @@ fn file_kind(path: &Path) -> FileKind {
         }
     }
     FileKind::Other
-}
-
-fn kind_color(k: &FileKind, t: &Theme) -> Color {
-    match k {
-        FileKind::Dir     => t.blue,  FileKind::Image   => t.pink,
-        FileKind::Video   => t.mauve, FileKind::Audio   => t.mauve,
-        FileKind::Archive => t.red,   FileKind::Doc     => t.yellow,
-        FileKind::Code    => t.green, FileKind::Exec    => t.teal,
-        FileKind::Symlink => t.teal,  FileKind::Other   => t.text,
-    }
-}
-
-fn named_dir_icon(name: &str, icon_set: &IconSet) -> Option<&'static str> {
-    match icon_set {
-        IconSet::Emoji => match name {
-            ".config"|".local"|".cache" => Some("⚙️ "),
-            ".ssh"                      => Some("🔒"),
-            ".git"|".github"            => Some("🐙"),
-            "downloads"                 => Some("⬇️ "),
-            "documents"                 => Some("📄"),
-            "desktop"                   => Some("🖥️ "),
-            "pictures"|"photos"|"images"=> Some("🖼️ "),
-            "videos"                    => Some("🎬"),
-            "music"|"audio"             => Some("🎵"),
-            "games"                     => Some("🎮"),
-            "projects"|"dev"|"code"|"src"=>Some("💻"),
-            _                           => None,
-        },
-        IconSet::Minimal => Some("▸"),
-        IconSet::None    => Some(""),
-        IconSet::NerdFont => match name {
-            ".config"                           => Some("\u{e5fc}"),
-            ".local"                            => Some("\u{f015}"),
-            ".cache"                            => Some("\u{f0c7}"),
-            ".ssh"                              => Some("\u{f023}"),
-            ".git" | ".github"                  => Some("\u{e702}"),
-            "downloads"                         => Some("\u{f019}"),
-            "documents"                         => Some("\u{f02d}"),
-            "desktop"                           => Some("\u{f108}"),
-            "pictures" | "photos" | "images"    => Some("\u{f03e}"),
-            "videos"                            => Some("\u{f03d}"),
-            "music" | "audio"                   => Some("\u{f001}"),
-            "games"                             => Some("\u{f11b}"),
-            "projects" | "dev" | "code" | "src" => Some("\u{e60c}"),
-            "home"                              => Some("\u{f015}"),
-            "tmp" | "temp"                      => Some("\u{f0c9}"),
-            "bin"                               => Some("\u{f489}"),
-            "lib" | "lib64"                     => Some("\u{f121}"),
-            "etc"                               => Some("\u{f013}"),
-            "usr"                               => Some("\u{f007}"),
-            "var"                               => Some("\u{f1c0}"),
-            "opt"                               => Some("\u{f187}"),
-            "boot"                              => Some("\u{f0a0}"),
-            "root"                              => Some("\u{f023}"),
-            "node_modules"                      => Some("\u{e718}"),
-            "target"                            => Some("\u{f140}"),
-            "public"                            => Some("\u{f0ac}"),
-            "fonts"                             => Some("\u{f031}"),
-            "themes"                            => Some("\u{f53f}"),
-            "icons"                             => Some("\u{f03e}"),
-            "wallpapers" | "walls"              => Some("\u{f03e}"),
-            "scripts"                           => Some("\u{f489}"),
-            "dotfiles"                          => Some("\u{e615}"),
-            _                                   => None,
-        },
-    }
-}
-
-fn file_icon(path: &Path, kind: &FileKind, icon_set: &IconSet) -> &'static str {
-    match icon_set {
-        IconSet::None    => "",
-        IconSet::Minimal => match kind {
-            FileKind::Dir     => "▸",
-            FileKind::Symlink => "↪",
-            FileKind::Image   => "i",
-            FileKind::Video   => "v",
-            FileKind::Audio   => "a",
-            FileKind::Archive => "z",
-            FileKind::Doc     => "d",
-            FileKind::Code    => "c",
-            FileKind::Exec    => "x",
-            FileKind::Other   => "f",
-        },
-        IconSet::Emoji => match kind {
-            FileKind::Dir     => "📁",
-            FileKind::Symlink => "🔗",
-            FileKind::Image   => "🖼 ",
-            FileKind::Video   => "🎬",
-            FileKind::Audio   => "🎵",
-            FileKind::Archive => "📦",
-            FileKind::Doc     => "📄",
-            FileKind::Code    => "📝",
-            FileKind::Exec    => "⚙ ",
-            FileKind::Other   => "📄",
-        },
-        IconSet::NerdFont => {
-            if *kind == FileKind::Dir {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
-                if let Some(ic) = named_dir_icon(&name, icon_set) { return ic; }
-                return "\u{f07b}";
-            }
-            if *kind == FileKind::Symlink { return "\u{f0c1}"; }
-            let ext  = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
-            match name.as_str() {
-                ".bashrc"|".bash_profile"|".bash_history" => return "\u{f489}",
-                ".zshrc"|".zshenv"|".zprofile"            => return "\u{f489}",
-                ".gitconfig"|".gitignore"|".gitmodules"   => return "\u{e702}",
-                "makefile"|"gnumakefile"                  => return "\u{f423}",
-                "dockerfile"                              => return "\u{f308}",
-                "cargo.toml"|"cargo.lock"                 => return "\u{e7a8}",
-                "package.json"|"package-lock.json"        => return "\u{e718}",
-                "readme.md"|"readme.txt"|"readme"         => return "\u{f48a}",
-                _ => {}
-            }
-            match ext.as_str() {
-                "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"ico"|"svg"|"tiff"|"avif" => "\u{f03e}",
-                "mp4"|"mkv"|"avi"|"mov"|"webm"|"flv"|"wmv"  => "\u{f03d}",
-                "mp3"|"flac"|"ogg"|"wav"|"aac"|"m4a"|"opus" => "\u{f001}",
-                "zip"|"tar"|"gz"|"bz2"|"xz"|"zst"|"tgz"|"7z"|"rar"|"tbz2" => "\u{f410}",
-                "pdf"        => "\u{f1c1}", "doc"|"docx" => "\u{f1c2}",
-                "xls"|"xlsx" => "\u{f1c3}", "ppt"|"pptx" => "\u{f1c4}",
-                "rs"  => "\u{e7a8}", "py"  => "\u{e606}", "js"|"mjs" => "\u{e74e}",
-                "ts"  => "\u{e628}", "go"  => "\u{e626}", "c"        => "\u{e61e}",
-                "cpp"|"cc"|"cxx" => "\u{e61d}", "h"|"hpp" => "\u{f0fd}",
-                "java" => "\u{e738}", "rb"  => "\u{e739}", "php" => "\u{e73d}",
-                "sh"|"bash"|"zsh"|"fish" => "\u{f489}",
-                "lua" => "\u{e620}", "vim" => "\u{e62b}", "toml" => "\u{f669}",
-                "yaml"|"yml" => "\u{f481}", "json" => "\u{e60b}", "xml" => "\u{f72d}",
-                "html"|"htm" => "\u{f13b}", "css" => "\u{e749}", "scss"|"sass" => "\u{e603}",
-                "md"|"markdown" => "\u{f48a}", "txt"|"rst" => "\u{f15c}",
-                "conf"|"ini"|"cfg" => "\u{f013}", "env" => "\u{f462}",
-                "lock" => "\u{f023}", "log" => "\u{f18d}",
-                "ttf"|"otf"|"woff"|"woff2" => "\u{f031}",
-                _ if *kind == FileKind::Exec => "\u{f489}",
-                _ => "\u{f15b}",
-            }
-        }
-    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -726,12 +789,7 @@ fn current_time_str() -> String {
         .unwrap_or_default()
         .as_secs();
     let (_, _, _, h, mi) = secs_to_datetime(secs);
-    // get seconds separately
-    let raw = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let sc = raw % 60;
+    let sc = secs % 60;
     format!("{:02}:{:02}:{:02}", h, mi, sc)
 }
 
@@ -806,6 +864,7 @@ impl SettingsState {
             SettingsSection::Openers    => vec![
                 ("opener_image","Image"), ("opener_video","Video"), ("opener_audio","Audio"),
                 ("opener_doc","Documents"), ("opener_editor","Editor"),
+                ("opener_jar","Java (.jar)"), ("opener_terminal","Terminal"),
                 // Archive extraction is built-in per format
                 ("fixed_arc_rar",  "Archive .rar"),
                 ("fixed_arc_zip",  "Archive .zip"),
@@ -851,9 +910,9 @@ impl SettingsState {
             ],
         }
     }
-    fn dropdown_options(key: &str, user_themes: &[UserThemeEntry]) -> Option<Vec<String>> {
+    fn dropdown_options(key: &str) -> Option<Vec<String>> {
         match key {
-            "theme"       => Some(Theme::all_names_merged(user_themes)),
+            "theme"       => Some(Theme::installed_names()),
             "icon_set"    => Some(vec!["nerdfont","emoji","minimal","none"].iter().map(|s| s.to_string()).collect()),
             "show_hidden"      => Some(vec!["true".to_string(), "false".to_string()]),
             "show_clock"       => Some(vec!["true".to_string(), "false".to_string()]),
@@ -876,7 +935,8 @@ impl SettingsState {
             "opener_audio"      => cfg.opener_audio.clone(),
             "opener_doc"        => cfg.opener_doc.clone(),
             "opener_editor"     => cfg.opener_editor.clone(),
-            "opener_archive"    => cfg.opener_archive.clone(),
+            "opener_jar"        => cfg.opener_jar.clone(),
+            "opener_terminal"   => cfg.opener_terminal.clone(),
             "key_copy"          => cfg.key_copy.clone(),
             "key_cut"           => cfg.key_cut.clone(),
             "key_paste"         => cfg.key_paste.clone(),
@@ -932,7 +992,6 @@ impl SettingsState {
             "opener_audio"      => cfg.opener_audio    = val.into(),
             "opener_doc"        => cfg.opener_doc      = val.into(),
             "opener_editor"     => cfg.opener_editor   = val.into(),
-            "opener_archive"    => cfg.opener_archive  = val.into(),
             "key_copy"          => cfg.key_copy          = val.into(),
             "key_cut"           => cfg.key_cut           = val.into(),
             "key_paste"         => cfg.key_paste         = val.into(),
@@ -1027,6 +1086,17 @@ impl Tab {
     fn deselect_all(&mut self) { self.selected.clear(); }
 }
 
+// ─── Extraction progress ─────────────────────────────────────────────────────
+#[derive(Clone)]
+struct ExtractionProgress {
+    filename:   String,
+    current:    u64,
+    total:      u64,
+    done:       bool,
+    error:      Option<String>,
+    start_time: Instant,
+}
+
 // ─── InputMode ────────────────────────────────────────────────────────────────
 #[derive(PartialEq)]
 enum InputMode {
@@ -1038,13 +1108,15 @@ enum InputMode {
     Confirm,
     Settings,
     Help,
+    Extracting,
+    RunArgs(PathBuf, bool), // (path, prepend_mode)
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 struct App {
     cfg:         Config,
     theme:       Theme,
-    icon_set:    IconSet,
+    icons:       IconData,
     tabs:        Vec<Tab>,
     tab_idx:     usize,
     yank:        Vec<PathBuf>,
@@ -1074,17 +1146,17 @@ struct App {
     vid_thumb_rx:    Option<mpsc::Receiver<PathBuf>>, // signals thumb is ready
     // Live clock string, updated every tick
     clock_str:    String,
-    // User-defined themes loaded from system and user theme directories
-    user_themes:  Vec<UserThemeEntry>,
+    // Archive extraction progress
+    extract_progress: Option<ExtractionProgress>,
+    extract_rx:       Option<mpsc::Receiver<ExtractionProgress>>,
 }
 impl App {
     fn new(start: PathBuf, cfg: Config) -> Self {
         let sh = cfg.show_hidden;
-        let user_themes = UserThemeEntry::load_all();
-        let theme    = Theme::resolve(&cfg.theme, &user_themes);
-        let icon_set = IconSet::by_name(&cfg.icon_set);
+        let icons = IconData::load(&cfg.icon_set);
+        let theme = Theme::load(&cfg.theme);
         Self {
-            theme, icon_set,
+            theme, icons,
             tabs: vec![Tab::new(start, sh)], tab_idx: 0,
             yank: vec![], yank_cut: false,
             mode: InputMode::Normal, input_buf: String::new(),
@@ -1103,7 +1175,8 @@ impl App {
             vid_thumb_state: None,
             vid_thumb_rx: None,
             clock_str: current_time_str(),
-            user_themes,
+            extract_progress: None,
+            extract_rx: None,
         }
     }
     fn tab(&self)         -> &Tab     { &self.tabs[self.tab_idx] }
@@ -1148,6 +1221,38 @@ impl App {
                 }
             }
         }
+        // Drain extraction progress channel
+        if self.extract_rx.is_some() {
+            let mut last: Option<ExtractionProgress> = None;
+            let mut done = false;
+            if let Some(rx) = &self.extract_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Some(p) = last {
+                if done {
+                    if let Some(ref e) = p.error.clone() {
+                        self.msg(&format!("Extract error: {}", e), true);
+                    } else {
+                        self.msg(&format!("Extracted {}", p.filename), false);
+                        self.tab_mut().refresh();
+                    }
+                    self.extract_rx       = None;
+                    self.extract_progress = None;
+                    self.mode             = InputMode::Normal;
+                } else {
+                    let st = self.extract_progress.as_ref()
+                        .map(|e| e.start_time)
+                        .unwrap_or_else(Instant::now);
+                    self.extract_progress = Some(ExtractionProgress { start_time: st, ..p });
+                }
+            }
+        }
+
         // Clear image state if we've navigated away from an image
         let is_image = self.tab().current()
             .and_then(|p| p.extension())
@@ -1252,101 +1357,202 @@ impl App {
         else if VIDEO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_video).arg(&path).spawn(); }
         else if AUDIO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_audio).arg(&path).spawn(); }
         else if DOC_EXT.contains(&ext)     { let _ = Command::new(&cfg.opener_doc).arg(&path).spawn(); }
+        else if JAR_EXT.contains(&ext)     {
+            // New terminal window — stdout/stderr visible to user, TUI never touched
+            let term = cfg.opener_terminal.clone();
+            // Quote the path so spaces in filenames/dirs work correctly
+            let path_escaped = path.to_string_lossy().replace("'", "'\''");
+            let jar_cmd = format!("{} '{}'", cfg.opener_jar, path_escaped);
+            // Pause after exit so the user can read any output before the window closes
+            let full_cmd = format!("{}; echo; echo '-- Press Enter to close --'; read _", jar_cmd);
+            let _ = Command::new(&term)
+                .args(["--", "sh", "-c", &full_cmd])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn();
+            self.msg(&format!("Launching {} in terminal", path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false);
+        }
         else if ARCHIVE_EXT.contains(&ext) { self.extract_archive(&path.clone()); }
-        else { self.nvim_path = Some(path); }
+        else {
+            // Shell scripts and executables — run in a new terminal window
+            let is_script = matches!(ext, "sh"|"bash"|"zsh"|"fish");
+            let is_exec = {
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                }
+                #[cfg(not(unix))] { false }
+            };
+            if is_script || is_exec {
+                // Open args bar — Enter to launch, Tab toggles prepend/append mode
+                self.input_buf.clear();
+                self.mode = InputMode::RunArgs(path, false);
+            } else {
+                self.nvim_path = Some(path);
+            }
+        }
     }
     fn extract_archive(&mut self, path: &Path) {
-        let dst = path.parent().unwrap_or(Path::new("."));
-        let dst_s = dst.to_string_lossy().into_owned();
-        let src_s = path.to_string_lossy().into_owned();
-        let ext = path.extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
-        // Also check double-extension e.g. .tar.gz / .tar.bz2 / .tar.xz / .tar.zst
+        let dst      = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let src_s    = path.to_string_lossy().into_owned();
+        let dst_s    = dst.to_string_lossy().into_owned();
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let ext      = path.extension()
+            .and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
         let name_lower = path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
+            .and_then(|n| n.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
 
-        // All commands are spawned detached with stdio suppressed so they
-        // never bleed into the TUI — stdout/stderr → /dev/null, no wait.
-        let null = std::process::Stdio::null;
+        // Get total uncompressed size for progress (best-effort)
+        let total_bytes: u64 = Self::archive_total_size(&src_s, &ext, &name_lower);
 
-        let res: std::io::Result<std::process::Child> = if ext == "rar" {
-            // unrar x <archive> <dest/>
-            Command::new("unrar")
-                .args(["x", "-o+", &src_s, &format!("{}/", dst_s)])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "zip" {
-            // unzip -o <archive> -d <dest>
-            Command::new("unzip")
-                .args(["-o", &src_s, "-d", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
-            Command::new("tar")
-                .args(["-xzf", &src_s, "-C", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
-            Command::new("tar")
-                .args(["-xjf", &src_s, "-C", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if name_lower.ends_with(".tar.xz") {
-            Command::new("tar")
-                .args(["-xJf", &src_s, "-C", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if name_lower.ends_with(".tar.zst") {
-            Command::new("tar")
-                .args(["--zstd", "-xf", &src_s, "-C", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "tar" {
-            Command::new("tar")
-                .args(["-xf", &src_s, "-C", &dst_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "gz" {
-            // Plain .gz (not tar) — gunzip in place
-            Command::new("gunzip")
-                .args(["-kf", &src_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "bz2" {
-            Command::new("bunzip2")
-                .args(["-kf", &src_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "xz" {
-            Command::new("xz")
-                .args(["-dkf", &src_s])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
-        } else if ext == "zst" {
-            Command::new("zstd")
-                .args(["-dkf", &src_s, "-o", &format!("{}/{}", dst_s,
-                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"))])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
+        let (tx, rx) = mpsc::channel::<ExtractionProgress>();
+        self.extract_rx       = Some(rx);
+        self.extract_progress = Some(ExtractionProgress {
+            filename: filename.clone(), current: 0, total: total_bytes,
+            done: false, error: None, start_time: Instant::now(),
+        });
+        self.mode = InputMode::Extracting;
+
+        let fname = filename.clone();
+        std::thread::spawn(move || {
+            // Choose command + args based on format; pipe stdout for progress parsing
+            let result = Self::run_extraction_with_progress(&src_s, &dst_s, &ext, &name_lower, total_bytes, &tx, &fname);
+            let _ = tx.send(ExtractionProgress {
+                filename: fname, current: total_bytes.max(1), total: total_bytes.max(1),
+                done: true, error: result.err().map(|e| e.to_string()),
+                start_time: Instant::now(),
+            });
+        });
+    }
+
+    fn archive_total_size(src_s: &str, ext: &str, name_lower: &str) -> u64 {
+        // Best-effort: ask each tool for the total uncompressed size
+        let out = if ext == "zip" {
+            Command::new("unzip").args(["-l", src_s]).output().ok()
+        } else if ext == "rar" {
+            Command::new("unrar").args(["l", src_s]).output().ok()
+        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz")
+               || name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2")
+               || name_lower.ends_with(".tar.xz")  || name_lower.ends_with(".tar.zst")
+               || ext == "tar" {
+            Command::new("tar").args(["--list", "--verbose", "-f", src_s]).output().ok()
         } else if ext == "7z" {
-            Command::new("7z")
-                .args(["x", &src_s, &format!("-o{}", dst_s), "-y"])
-                .stdout(null()).stderr(null()).stdin(null())
-                .spawn()
+            Command::new("7z").args(["l", src_s]).output().ok()
         } else {
-            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                format!("No extractor for .{}", ext)))
+            None
+        };
+        out.and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            // Parse last number on last non-empty line (most tools put total there)
+            text.lines().rev()
+                .find(|l| !l.trim().is_empty())
+                .and_then(|l| l.split_whitespace().filter_map(|w| w.parse::<u64>().ok()).last())
+        }).unwrap_or(0)
+    }
+
+    fn run_extraction_with_progress(
+        src_s: &str, dst_s: &str, ext: &str, name_lower: &str,
+        total: u64, tx: &mpsc::Sender<ExtractionProgress>, fname: &str,
+    ) -> std::io::Result<()> {
+        use std::io::{BufRead, BufReader};
+
+        // Build command with stdout piped so we can read progress lines
+        let mut cmd = if ext == "rar" {
+            let mut c = Command::new("unrar");
+            c.args(["x", "-o+", src_s, &format!("{}/", dst_s)]);
+            c
+        } else if ext == "zip" {
+            let mut c = Command::new("unzip");
+            c.args(["-o", src_s, "-d", dst_s]);
+            c
+        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
+            let mut c = Command::new("tar");
+            c.args(["-xzvf", src_s, "-C", dst_s]);
+            c
+        } else if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
+            let mut c = Command::new("tar");
+            c.args(["-xjvf", src_s, "-C", dst_s]);
+            c
+        } else if name_lower.ends_with(".tar.xz") {
+            let mut c = Command::new("tar");
+            c.args(["-xJvf", src_s, "-C", dst_s]);
+            c
+        } else if name_lower.ends_with(".tar.zst") {
+            let mut c = Command::new("tar");
+            c.args(["--zstd", "-xvf", src_s, "-C", dst_s]);
+            c
+        } else if ext == "tar" {
+            let mut c = Command::new("tar");
+            c.args(["-xvf", src_s, "-C", dst_s]);
+            c
+        } else if ext == "7z" {
+            let mut c = Command::new("7z");
+            c.args(["x", src_s, &format!("-o{}", dst_s), "-y"]);
+            c
+        } else if ext == "gz" {
+            let mut c = Command::new("gunzip");
+            c.args(["-kf", src_s]);
+            c
+        } else if ext == "bz2" {
+            let mut c = Command::new("bunzip2");
+            c.args(["-kf", src_s]);
+            c
+        } else if ext == "xz" {
+            let mut c = Command::new("xz");
+            c.args(["-dkf", src_s]);
+            c
+        } else if ext == "zst" {
+            let out_name = std::path::Path::new(src_s)
+                .file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+            let mut c = Command::new("zstd");
+            c.args(["-dkf", src_s, "-o", &format!("{}/{}", dst_s, out_name)]);
+            c
+        } else {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                format!("No extractor for .{}", ext)));
         };
 
-        match res {
-            Ok(_)  => self.msg(&format!("Extracting {} \u{2026}", 
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false),
-            Err(e) => self.msg(&format!("Extract error: {}", e), true),
+        cmd.stdout(std::process::Stdio::piped())
+           .stderr(std::process::Stdio::piped())
+           .stdin(std::process::Stdio::null());
+
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().unwrap();
+        let reader = BufReader::new(stdout);
+
+        let mut extracted: u64 = 0;
+        // Each output line = one file extracted; accumulate size estimates
+        for line in reader.lines() {
+            let line = match line { Ok(l) => l, Err(_) => break };
+            // Try to parse a file size from the line (works for tar -v, unzip, 7z, unrar)
+            // Format varies: tar prints the path, unzip "  Length  ...", 7z "  Size  ..."
+            // We count files as progress units when total_bytes is unknown,
+            // and try to add the size when we can parse it.
+            let size_in_line: u64 = line.split_whitespace()
+                .filter_map(|w| w.parse::<u64>().ok())
+                .next()
+                .unwrap_or(0);
+
+            if total == 0 {
+                // Unknown total — count files
+                extracted += 1;
+            } else {
+                extracted = (extracted + size_in_line.max(1)).min(total);
+            }
+
+            let _ = tx.send(ExtractionProgress {
+                filename:   fname.to_string(),
+                current:    extracted,
+                total,
+                done:       false,
+                error:      None,
+                start_time: Instant::now(),
+            });
         }
+
+        child.wait()?;
+        Ok(())
     }
     fn new_tab(&mut self) {
         let cwd = self.tab().cwd.clone(); let sh = self.cfg.show_hidden;
@@ -1450,7 +1656,6 @@ impl App {
     }
 }
 
-
 fn collect_all_streaming(dir: &Path, tx: &mpsc::Sender<PathBuf>, depth: usize, show_hidden: bool) {
     if depth > 6 { return; }
     if let Ok(rd) = fs::read_dir(dir) {
@@ -1486,9 +1691,7 @@ fn fuzzy_score(hay: &str, needle: &str) -> i32 {
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
 fn ui(f: &mut Frame, app: &mut App) {
-    // ratatui 0.29: f.size()  |  ratatui 0.30+: f.area()
-    #[allow(deprecated)]
-    let sz = f.size();
+    let sz = f.area();
 
     if app.mode == InputMode::Settings {
         draw_settings(f, app, sz);
@@ -1517,24 +1720,26 @@ fn ui(f: &mut Frame, app: &mut App) {
         InputMode::Rename(_) | InputMode::NewFile | InputMode::NewDir => draw_input_overlay(f, app, sz),
         InputMode::Confirm => draw_confirm_overlay(f, app, sz),
         InputMode::Help => draw_help_overlay(f, app, sz),
+        InputMode::Extracting => draw_extract_overlay(f, app, sz),
+        InputMode::RunArgs(..) => draw_runargs_overlay(f, app, sz),
         _ => {}
     }
 }
 
 fn draw_tab_bar(f: &mut Frame, app: &App, rect: Rect) {
     // Fill the whole bar with surface0 first
-    let bg_block = Block::default().style(st_bg(app.theme.subtext, app.theme.surface0));
+    let bg_block = Block::default().style(st_bg(app.theme.fg_dim, app.theme.bg_panel));
     f.render_widget(bg_block, rect);
 
     // Right side: clock + date (if enabled)
     let clock_widget_w: u16 = if app.cfg.show_clock {
         // " HH:MM:SS  DD/MM/YYYY " = ~22 chars
-        let clock_label = format!(" \u{f017} {}   \u{f073} {} ", app.clock_str, current_date_str());
+        let clock_label = format!(" {} {}   {} {} ", app.icons.chrome.clock, app.clock_str, app.icons.chrome.calendar, current_date_str());
         let w = clock_label.chars().count() as u16;
         let cx = rect.x + rect.width.saturating_sub(w);
         let clock_rect = Rect { x: cx, y: rect.y, width: w, height: 1 };
         f.render_widget(
-            Paragraph::new(Span::styled(clock_label, bold_bg(app.theme.mauve, app.theme.surface0))),
+            Paragraph::new(Span::styled(clock_label, bold_bg(app.theme.accent, app.theme.bg_panel))),
             clock_rect,
         );
         w
@@ -1548,9 +1753,9 @@ fn draw_tab_bar(f: &mut Frame, app: &App, rect: Rect) {
         let is_active = i == app.tab_idx;
 
         let (fg, bg) = if is_active {
-            (app.theme.base, app.theme.mauve)
+            (app.theme.bg_primary, app.theme.accent)
         } else {
-            (app.theme.subtext, app.theme.surface0)
+            (app.theme.fg_dim, app.theme.bg_panel)
         };
 
         let w = label.chars().count() as u16;
@@ -1567,7 +1772,7 @@ fn draw_tab_bar(f: &mut Frame, app: &App, rect: Rect) {
         if x < rect.x + available {
             let sep_rect = Rect { x, y: rect.y, width: 1, height: 1 };
             f.render_widget(
-                Paragraph::new(Span::styled("\u{e0b0}", st_bg(bg, app.theme.surface0))),
+                Paragraph::new(Span::styled(&app.icons.chrome.tab_sep, st_bg(bg, app.theme.bg_panel))),
                 sep_rect,
             );
             x += 1;
@@ -1602,17 +1807,17 @@ fn draw_parent_pane(f: &mut Frame, app: &App, rect: Rect) {
     let items: Vec<ListItem> = entries.iter().take(h).map(|e| {
         let k    = file_kind(e);
         let fg   = kind_color(&k, &app.theme);
-        let ic   = file_icon(e, &k, &app.icon_set);
+        let ic   = app.icons.file_icon(e, &k);
         let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let is_cur = *e == tab.cwd;
-        let(fg, bg) = if is_cur { (app.theme.base, app.theme.blue) } else { (fg, app.theme.base) };
+        let(fg, bg) = if is_cur { (app.theme.bg_primary, app.theme.border) } else { (fg, app.theme.bg_primary) };
         ListItem::new(Line::from(vec![
             Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
             Span::styled(name, st_bg(fg, bg)),
         ]))
     }).collect();
 
-    let block = Block::default().style(st_bg(app.theme.text, app.theme.base));
+    let block = Block::default().style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(List::new(items).block(block), rect);
 }
 
@@ -1637,14 +1842,14 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         .map(|(i, e)| {
             let k    = file_kind(e);
             let fg   = kind_color(&k, &app.theme);
-            let ic   = file_icon(e, &k, &app.icon_set);
+            let ic   = app.icons.file_icon(e, &k);
             let name = e.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let size = file_size_str(e);
             let is_cur = tab.state.selected() == Some(i);
             let is_sel = tab.selected.contains(e);
-            let (fg, bg) = if is_cur { (app.theme.base, app.theme.mauve) }
-                           else if is_sel { (app.theme.mauve, app.theme.surface0) }
-                           else { (fg, app.theme.base) };
+            let (fg, bg) = if is_cur { (app.theme.bg_primary, app.theme.accent) }
+                           else if is_sel { (app.theme.accent, app.theme.bg_panel) }
+                           else { (fg, app.theme.bg_primary) };
             let mtime_str = if app.cfg.show_file_mtime {
                 let (t, d) = format_mtime_split(e);
                 format!("  {} {}", t, d)
@@ -1655,20 +1860,20 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
                 Span::styled(name_clipped, st_bg(fg, bg)),
-                Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.base } else { app.theme.overlay0 }, bg)),
-                Span::styled(mtime_str, st_bg(app.theme.overlay0, bg)),
+                Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.bg_primary } else { app.theme.fg_muted }, bg)),
+                Span::styled(mtime_str, st_bg(app.theme.fg_muted, bg)),
             ]))
         }).collect();
 
     let title = {
         let name = tab.cwd.file_name().and_then(|n| n.to_str()).unwrap_or("/");
-        format!(" \u{f07b} {} ", name)
+        format!(" {} {} ", app.icons.chrome.dir_icon, name)
     };
     let block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT)
-        .border_style(st(app.theme.surface1))
-        .title(Span::styled(title, bold(app.theme.blue)))
-        .style(st_bg(app.theme.text, app.theme.base));
+        .border_style(st(app.theme.bg_popup))
+        .title(Span::styled(title, bold(app.theme.border)))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
 
     let mut state = app.tab().state.clone();
     f.render_stateful_widget(List::new(items).block(block), rect, &mut state);
@@ -1685,7 +1890,7 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
 
     let tab = app.tab();
     let current = match tab.current() { Some(p) => p.clone(), None => {
-        let b = Block::default().style(st_bg(app.theme.text, app.theme.base));
+        let b = Block::default().style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(b, rect);
         return;
     }};
@@ -1699,13 +1904,13 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     // Header: line1 = icon + name, line2 = size
     let header = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled(format!(" {} ", file_icon(&current, &k, &app.icon_set)), st_bg(c, app.theme.base)),
-            Span::styled(name, bold_bg(c, app.theme.base)),
+            Span::styled(format!(" {} ", app.icons.file_icon(&current, &k)), st_bg(c, app.theme.bg_primary)),
+            Span::styled(name, bold_bg(c, app.theme.bg_primary)),
         ]),
         Line::from(vec![
-            Span::styled(format!("  {} ", size), st_bg(app.theme.overlay0, app.theme.base)),
+            Span::styled(format!("  {} ", size), st_bg(app.theme.fg_muted, app.theme.bg_primary)),
         ]),
-    ]).style(st_bg(app.theme.text, app.theme.base));
+    ]).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(header, inner[0]);
 
     let content_rect = inner[1];
@@ -1727,8 +1932,8 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
             StatefulImage::new().render(content_rect, f.buffer_mut(), state);
         } else {
             let p = Paragraph::new(Span::styled(
-                "\u{f03e}  (terminal does not support graphics protocol)",
-                st_bg(app.theme.overlay0, app.theme.base),
+                &app.icons.chrome.no_image,
+                st_bg(app.theme.fg_muted, app.theme.bg_primary),
             ));
             f.render_widget(p, content_rect);
         }
@@ -1741,11 +1946,11 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         let items: Vec<ListItem> = entries.iter().take(ch).map(|e| {
             let ek = file_kind(e);
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", file_icon(e, &ek, &app.icon_set)), st(kind_color(&ek, &app.theme))),
+                Span::styled(format!(" {} ", app.icons.file_icon(e, &ek)), st(kind_color(&ek, &app.theme))),
                 Span::styled(e.file_name().unwrap_or_default().to_string_lossy().to_string(), st(kind_color(&ek, &app.theme))),
             ]))
         }).collect();
-        let block = Block::default().style(st_bg(app.theme.text, app.theme.base));
+        let block = Block::default().style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(List::new(items).block(block), content_rect);
         return;
     }
@@ -1767,17 +1972,17 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
             let lines = vec![
                 Line::from(Span::styled(
                     if generating { "  Generating thumbnail…" } else { "  (ffmpeg not available)" },
-                    st(app.theme.overlay0),
+                    st(app.theme.fg_muted),
                 )),
-                Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.subtext))),
-                Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.subtext))),
+                Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.fg_dim))),
+                Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.fg_dim))),
                 Line::from(Span::raw("")),
                 Line::from(Span::styled(
                     format!("  Press Enter to open with {}", app.cfg.opener_video),
-                    st(app.theme.overlay0),
+                    st(app.theme.fg_muted),
                 )),
             ];
-            let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+            let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
             f.render_widget(p, content_rect);
         }
         return;
@@ -1787,16 +1992,16 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     if AUDIO_EXT.contains(&ext.as_str()) {
         let size_str = human_size(current.metadata().map(|m| m.len()).unwrap_or(0));
         let lines = vec![
-            Line::from(Span::styled("  Audio file", bold(app.theme.subtext))),
-            Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.subtext))),
-            Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.subtext))),
+            Line::from(Span::styled("  Audio file", bold(app.theme.fg_dim))),
+            Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.fg_dim))),
+            Line::from(Span::styled(format!("  Format: .{}", ext), st(app.theme.fg_dim))),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
                 format!("  Press Enter to open with {}", app.cfg.opener_audio),
-                st(app.theme.overlay0),
+                st(app.theme.fg_muted),
             )),
         ];
-        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(p, content_rect);
         return;
     }
@@ -1809,11 +2014,11 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
 
     if file_size > PREVIEW_SIZE_LIMIT {
         let lines = vec![
-            Line::from(Span::styled("  (large file — preview skipped)", st(app.theme.overlay0))),
-            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.subtext))),
-            Line::from(Span::styled("  Press Enter to open in your editor.", st(app.theme.overlay0))),
+            Line::from(Span::styled("  (large file — preview skipped)", st(app.theme.fg_muted))),
+            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.fg_dim))),
+            Line::from(Span::styled("  Press Enter to open in your editor.", st(app.theme.fg_muted))),
         ];
-        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(p, content_rect);
         return;
     }
@@ -1830,16 +2035,16 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     if let Some(content) = preview_text {
         let lines: Vec<Line> = content.lines().take(ch).map(|l| {
             let clipped: String = l.chars().take(content_rect.width as usize).collect();
-            Line::from(Span::styled(clipped, st(app.theme.subtext)))
+            Line::from(Span::styled(clipped, st(app.theme.fg_dim)))
         }).collect();
-        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(p, content_rect);
     } else {
         let lines = vec![
-            Line::from(Span::styled("  (binary file)", st(app.theme.overlay0))),
-            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.subtext))),
+            Line::from(Span::styled("  (binary file)", st(app.theme.fg_muted))),
+            Line::from(Span::styled(format!("  Size: {}", human_size(file_size)), st(app.theme.fg_dim))),
         ];
-        let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+        let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
         f.render_widget(p, content_rect);
     }
 }
@@ -1852,35 +2057,138 @@ fn draw_status_bar(f: &mut Frame, app: &App, rect: Rect) {
     let total = tab.visible().len();
 
     let mut spans = vec![
-        Span::styled(format!("  {}  ", cwd), bold_bg(app.theme.base, app.theme.blue)),
+        Span::styled(format!("  {}  ", cwd), bold_bg(app.theme.bg_primary, app.theme.border)),
     ];
     if !app.status_msg.is_empty() {
-        let (fg, bg) = if app.status_err { (app.theme.base, app.theme.red) } else { (app.theme.base, app.theme.teal) };
+        let (fg, bg) = if app.status_err { (app.theme.bg_primary, app.theme.warn) } else { (app.theme.bg_primary, app.theme.ok) };
         spans.push(Span::styled(format!("  {}  ", app.status_msg), bold_bg(fg, bg)));
     }
     if !app.yank.is_empty() {
-        spans.push(Span::styled(format!("  \u{f0c5} {}  ", app.yank.len()), bold_bg(app.theme.base, app.theme.yellow)));
+        spans.push(Span::styled(format!("  {} {}  ", app.icons.chrome.yank_icon, app.yank.len()), bold_bg(app.theme.bg_primary, app.theme.accent2)));
     }
     if !tab.selected.is_empty() {
-        spans.push(Span::styled(format!("  \u{f14a} {}  ", tab.selected.len()), bold_bg(app.theme.base, app.theme.mauve)));
+        spans.push(Span::styled(format!("  {} {}  ", app.icons.chrome.sel_icon, tab.selected.len()), bold_bg(app.theme.bg_primary, app.theme.accent)));
     }
     // Right-align count
     let count_str = format!("  {}/{}  ", cur, total);
     let used: usize = spans.iter().map(|s| s.content.len()).sum();
     let pad = (rect.width as usize).saturating_sub(used + count_str.len());
-    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.subtext, app.theme.base)));
-    spans.push(Span::styled(count_str, bold_bg(app.theme.base, app.theme.surface1)));
+    spans.push(Span::styled(" ".repeat(pad), st_bg(app.theme.fg_dim, app.theme.bg_primary)));
+    spans.push(Span::styled(count_str, bold_bg(app.theme.bg_primary, app.theme.bg_popup)));
 
-    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.subtext, app.theme.base));
+    let bar = Paragraph::new(Line::from(spans)).style(st_bg(app.theme.fg_dim, app.theme.bg_primary));
     f.render_widget(bar, rect);
 }
 
 fn draw_help_bar(f: &mut Frame, app: &App, rect: Rect) {
     let bar = Paragraph::new(Line::from(vec![
-        Span::styled(" ?", bold(app.theme.mauve)),
-        Span::styled(":help ", st(app.theme.overlay0)),
-    ])).style(st_bg(app.theme.overlay0, app.theme.base));
+        Span::styled(" ?", bold(app.theme.accent)),
+        Span::styled(":help ", st(app.theme.fg_muted)),
+    ])).style(st_bg(app.theme.fg_muted, app.theme.bg_primary));
     f.render_widget(bar, rect);
+}
+
+fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 2 / 3).max(50).min(rect.width);
+    let oh = 9u16;
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let prog = match &app.extract_progress {
+        Some(p) => p.clone(),
+        None    => return,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  \u{f410} Extracting {}  [Esc cancel]  ", prog.filename),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Layout: spacer / bar / stats / spacer
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    // ── Progress bar ──────────────────────────────────────────────────────────
+    let bar_w = rows[1].width as usize;
+    let (pct, filled) = if prog.total > 0 {
+        let p = (prog.current * 100 / prog.total).min(100);
+        let f = (prog.current * bar_w as u64 / prog.total).min(bar_w as u64) as usize;
+        (p, f)
+    } else {
+        // Unknown total — animate a bouncing block
+        let pos = prog.current as usize % (bar_w * 2);
+        let pos = if pos < bar_w { pos } else { bar_w * 2 - pos };
+        (0, pos.min(bar_w / 5 + 1))
+    };
+
+    let filled_str: String = app.icons.chrome.progress_fill.repeat(filled);
+    let empty_str:  String = std::iter::repeat('\u{2591}').take(bar_w.saturating_sub(filled)).collect();
+
+    let bar_line = Line::from(vec![
+        Span::styled(filled_str, bold(app.theme.accent)),
+        Span::styled(empty_str, st(app.theme.bg_popup)),
+    ]);
+    f.render_widget(Paragraph::new(bar_line), rows[1]);
+
+    // ── Stats line ────────────────────────────────────────────────────────────
+    let stats = if prog.total > 0 {
+        format!("  {}%   {} / {}",
+            pct,
+            human_size_u64(prog.current),
+            human_size_u64(prog.total),
+        )
+    } else {
+        format!("  {} extracted  (total size unknown)", human_size_u64(prog.current))
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(stats, st(app.theme.fg_dim))),
+        rows[2],
+    );
+
+    // ── ETA line — real elapsed + estimated remaining ─────────────────────────
+    let elapsed_secs = prog.start_time.elapsed().as_secs();
+    let eta_str = if prog.done || pct >= 100 {
+        format!("  {}  Done in {}s", app.icons.chrome.done_icon, elapsed_secs)
+    } else if prog.total > 0 && prog.current > 0 {
+        let rate = prog.current as f64 / elapsed_secs.max(1) as f64;
+        let remaining = (prog.total.saturating_sub(prog.current)) as f64 / rate;
+        let eta_s = remaining as u64;
+        if eta_s < 60 {
+            format!("  {}  {}s elapsed  {}  ~{}s left", app.icons.chrome.eta_icon, elapsed_secs, app.icons.chrome.arrow_icon, eta_s)
+        } else {
+            format!("  {}  {}s elapsed  {}  ~{}m {}s left", app.icons.chrome.eta_icon, elapsed_secs, app.icons.chrome.arrow_icon, eta_s / 60, eta_s % 60)
+        }
+    } else {
+        format!("  {}  {}s elapsed…", app.icons.chrome.eta_icon, elapsed_secs)
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(eta_str, st(app.theme.fg_muted))),
+        rows[3],
+    );
+}
+
+fn human_size_u64(b: u64) -> String {
+    if b >= 1_073_741_824 { format!("{:.1} GB", b as f64 / 1_073_741_824.0) }
+    else if b >= 1_048_576 { format!("{:.1} MB", b as f64 / 1_048_576.0) }
+    else if b >= 1024      { format!("{:.0} KB", b as f64 / 1024.0) }
+    else                   { format!("{} B", b) }
 }
 
 fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
@@ -1893,12 +2201,12 @@ fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.mauve))
+        .border_style(bold(app.theme.accent))
         .title(Span::styled(
-            "  \u{f128} Keybinds  [Esc / ? to close]  ",
-            bold_bg(app.theme.subtext, app.theme.base),
+            format!("  {} Keybinds  [Esc / ? to close]  ", app.icons.chrome.help_icon),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
         ))
-        .style(st_bg(app.theme.text, app.theme.base));
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(block, popup);
 
     let inner = Rect {
@@ -1948,38 +2256,38 @@ fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
     ];
 
     let sections: &[(&str, &Vec<(String, String)>)] = &[
-        ("\u{f07b}  Navigation",     &nav_section),
-        ("\u{f0c5}  File Operations",&file_section),
-        ("\u{f002}  Search",         &search_section),
-        ("\u{f0e8}  Tabs",           &tab_section),
-        ("\u{f013}  App",            &app_section),
+        (&format!("{}  Navigation", app.icons.chrome.nav_icon),     &nav_section),
+        (&format!("{}  File Operations", app.icons.chrome.ops_icon),&file_section),
+        (&format!("{}  Search", app.icons.chrome.search_sec_icon), &search_section),
+        (&format!("{}  Tabs", app.icons.chrome.tab_sec_icon),           &tab_section),
+        (&format!("{}  App", app.icons.chrome.settings_icon), &app_section),
     ];
 
     let mut lines: Vec<Line> = vec![];
     for (section_title, binds) in sections {
-        lines.push(Line::from(Span::styled(format!(" {}", section_title), bold(app.theme.mauve))));
+        lines.push(Line::from(Span::styled(format!(" {}", section_title), bold(app.theme.accent))));
         for (key, action) in *binds {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<width$}", key, width = key_col_w), bold(app.theme.blue)),
-                Span::styled(action.clone(), st(app.theme.subtext)),
+                Span::styled(format!("  {:<width$}", key, width = key_col_w), bold(app.theme.border)),
+                Span::styled(action.clone(), st(app.theme.fg_dim)),
             ]));
         }
         lines.push(Line::from(Span::raw("")));
     }
 
-    let p = Paragraph::new(lines).style(st_bg(app.theme.text, app.theme.base));
+    let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(p, inner);
 }
 
 fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.mauve))
+        .border_style(bold(app.theme.accent))
         .title(Span::styled(
-            "  \u{f013} Settings  [\u{2190}\u{2192} sections  \u{2191}\u{2193} navigate  Enter edit  S save  Esc close]  ",
-            bold_bg(app.theme.subtext, app.theme.base),
+            format!("  {} Settings  [←→ sections  ↑↓ navigate  Enter edit  S save  Esc close]  ", app.icons.chrome.settings_icon),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
         ))
-        .style(st_bg(app.theme.text, app.theme.base));
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(block, rect);
 
     let inner = Layout::default()
@@ -1997,15 +2305,15 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     ];
     let titles: Vec<Line> = sections.iter().map(|(sec, label)| {
         let s = format!("  {}  ", label);
-        if *sec == app.settings.section { Line::from(Span::styled(s, bold_bg(app.theme.base, app.theme.mauve))) }
-        else { Line::from(Span::styled(s, st_bg(app.theme.subtext, app.theme.surface0))) }
+        if *sec == app.settings.section { Line::from(Span::styled(s, bold_bg(app.theme.bg_primary, app.theme.accent))) }
+        else { Line::from(Span::styled(s, st_bg(app.theme.fg_dim, app.theme.bg_panel))) }
     }).collect();
     let tabs = Tabs::new(titles)
         .select(match app.settings.section {
             SettingsSection::Behaviour  => 0, SettingsSection::Appearance => 1,
             SettingsSection::Openers    => 2, SettingsSection::Keybinds   => 3,
         })
-        .style(st_bg(app.theme.subtext, app.theme.surface0))
+        .style(st_bg(app.theme.fg_dim, app.theme.bg_panel))
         .divider(Span::raw(""));
     f.render_widget(tabs, inner[0]);
 
@@ -2016,15 +2324,15 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         let is_cur = i == app.settings.cursor;
         let is_fixed = key.starts_with("fixed_");
         let val_display = if app.settings.editing && is_cur {
-            format!("{}\u{2588}", app.settings.edit_buf)
+            format!("{}{}", app.settings.edit_buf, app.icons.chrome.cursor_block)
         } else { val };
-        let (lbg, vbg) = if is_cur { (app.theme.surface0, app.theme.surface1) } else { (app.theme.base, app.theme.base) };
+        let (lbg, vbg) = if is_cur { (app.theme.bg_panel, app.theme.bg_popup) } else { (app.theme.bg_primary, app.theme.bg_primary) };
         let (lfg, vfg) = if is_fixed {
-            (app.theme.overlay0, app.theme.overlay0)
+            (app.theme.fg_muted, app.theme.fg_muted)
         } else if is_cur {
-            (app.theme.text, app.theme.mauve)
+            (app.theme.fg_primary, app.theme.accent)
         } else {
-            (app.theme.subtext, app.theme.text)
+            (app.theme.fg_dim, app.theme.fg_primary)
         };
         ListItem::new(Line::from(vec![
             Span::styled(format!("  {:30}", label), st_bg(lfg, lbg)),
@@ -2034,12 +2342,12 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
 
     let mut state = ListState::default();
     state.select(Some(app.settings.cursor));
-    f.render_stateful_widget(List::new(list_items).style(st_bg(app.theme.text, app.theme.base)), inner[1], &mut state);
+    f.render_stateful_widget(List::new(list_items).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)), inner[1], &mut state);
 
     // Unsaved indicator
     if app.settings.dirty && !app.settings.dropdown {
         let hint = Paragraph::new("  Unsaved changes — press S to save")
-            .style(st_bg(app.theme.base, app.theme.yellow));
+            .style(st_bg(app.theme.bg_primary, app.theme.accent2));
         f.render_widget(hint, inner[2]);
     }
 
@@ -2047,7 +2355,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     if app.settings.dropdown {
         let items  = SettingsState::section_items(&app.settings.section);
         let (k, _) = items[app.settings.cursor];
-        let opts   = SettingsState::dropdown_options(k, &app.user_themes).unwrap_or_default();
+        let opts   = SettingsState::dropdown_options(k).unwrap_or_default();
 
         let dw = 36u16;
         let dh = (opts.len() as u16 + 2).min(rect.height - 4);
@@ -2063,21 +2371,22 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         let dd_items: Vec<ListItem> = opts.iter().enumerate().map(|(i, opt)| {
             let is_cur = i == app.settings.dd_cursor;
             let (fg, bg) = if is_cur {
-                (app.theme.base, app.theme.mauve)
+                (app.theme.bg_primary, app.theme.accent)
             } else {
-                (app.theme.text, app.theme.surface1)
+                (app.theme.fg_primary, app.theme.bg_popup)
             };
+            let arrow = if is_cur { format!(" {} ", app.icons.chrome.cursor_arrow) } else { "   ".to_string() };
             ListItem::new(Line::from(vec![
-                Span::styled(if is_cur { " \u{f0da} " } else { "   " }, st_bg(fg, bg)),
+                Span::styled(arrow, st_bg(fg, bg)),
                 Span::styled(opt.clone(), st_bg(fg, bg)),
             ]))
         }).collect();
 
         let dd_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(bold(app.theme.mauve))
-            .title(Span::styled(" \u{2191}\u{2193} select  Enter confirm  Esc cancel ", st(app.theme.overlay0)))
-            .style(st_bg(app.theme.text, app.theme.surface1));
+            .border_style(bold(app.theme.accent))
+            .title(Span::styled(" \u{2191}\u{2193} select  Enter confirm  Esc cancel ", st(app.theme.fg_muted)))
+            .style(st_bg(app.theme.fg_primary, app.theme.bg_popup));
 
         let mut dd_state = ListState::default();
         dd_state.select(Some(app.settings.dd_cursor));
@@ -2089,11 +2398,80 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     }
 }
 
+fn draw_runargs_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let (path, prepend) = match &app.mode {
+        InputMode::RunArgs(p, pre) => (p.clone(), *pre),
+        _ => return,
+    };
+    // Only show the filename — path is irrelevant to the user here
+    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+    let ow = (rect.width / 2).max(44).min(rect.width);
+    let oh = 5u16;
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    // Outer bordered box
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_panel));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title row: icon + name + mode pill
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // input row
+        ])
+        .split(inner);
+
+    // ── Row 0: icon  filename  [MODE] ────────────────────────────────────────
+    let (pill_txt, pill_sty) = if prepend {
+        (" PREPEND ", bold_bg(app.theme.bg_primary, app.theme.ok))
+    } else {
+        (" APPEND  ", bold_bg(app.theme.bg_primary, app.theme.accent))
+    };
+    // Truncate filename if needed to fit pill
+    let pill_w   = pill_txt.len() as u16 + 3; // pill + spaces
+    let name_max = (rows[0].width.saturating_sub(pill_w + 4)) as usize;
+    let fname_shown: String = if fname.chars().count() > name_max {
+        fname.chars().take(name_max.saturating_sub(1)).collect::<String>() + "\u{2026}"
+    } else {
+        fname.to_string()
+    };
+
+    let title_line = Line::from(vec![
+        Span::styled(format!(" {} {}", app.icons.chrome.terminal_icon, fname_shown), bold_bg(app.theme.fg_primary, app.theme.bg_panel)),
+        Span::styled(
+            " ".repeat(rows[0].width.saturating_sub(
+                fname_shown.chars().count() as u16 + 4 + pill_w
+            ) as usize + 1),
+            st_bg(app.theme.bg_panel, app.theme.bg_panel),
+        ),
+        Span::styled(pill_txt, pill_sty),
+        Span::styled(" ", st_bg(app.theme.bg_panel, app.theme.bg_panel)),
+    ]);
+    f.render_widget(Paragraph::new(title_line), rows[0]);
+
+    // ── Row 2: args input ─────────────────────────────────────────────────────
+    let prompt = Span::styled(" args: ", st_bg(app.theme.fg_muted, app.theme.bg_panel));
+    let input  = Span::styled(
+        format!("{}{}", app.input_buf, app.icons.chrome.cursor_block),
+        bold_bg(app.theme.fg_primary, app.theme.bg_panel),
+    );
+    f.render_widget(Paragraph::new(Line::from(vec![prompt, input])), rows[2]);
+}
+
 fn draw_input_overlay(f: &mut Frame, app: &App, rect: Rect) {
     let prompt = match &app.mode {
-        InputMode::Rename(_) => "\u{f040} Rename",
-        InputMode::NewFile   => "\u{f15b} New File",
-        InputMode::NewDir    => "\u{f07b} New Directory",
+        InputMode::Rename(_) => &format!("{} Rename", app.icons.chrome.rename_icon),
+        InputMode::NewFile   => &format!("{} New File", app.icons.chrome.newfile_icon),
+        InputMode::NewDir    => &format!("{} New Directory", app.icons.chrome.newdir_icon),
         _ => "",
     };
     let w = (rect.width / 2).max(40);
@@ -2104,10 +2482,10 @@ fn draw_input_overlay(f: &mut Frame, app: &App, rect: Rect) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.mauve))
-        .style(st_bg(app.theme.text, app.theme.base));
-    let text = format!(" {}: {}\u{2588}", prompt, app.input_buf);
-    let p = Paragraph::new(text).block(block).style(bold(app.theme.text));
+        .border_style(bold(app.theme.accent))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let text = format!(" {}: {}{}", prompt, app.input_buf, app.icons.chrome.cursor_block);
+    let p = Paragraph::new(text).block(block).style(bold(app.theme.fg_primary));
     f.render_widget(p, popup);
 }
 
@@ -2119,7 +2497,7 @@ fn draw_confirm_overlay(f: &mut Frame, app: &App, rect: Rect) {
     let y = rect.height / 2;
     let popup = Rect { x, y, width: w, height: h };
     f.render_widget(Clear, popup);
-    let p = Paragraph::new(msg).style(bold_bg(app.theme.base, app.theme.red));
+    let p = Paragraph::new(msg).style(bold_bg(app.theme.bg_primary, app.theme.warn));
     f.render_widget(p, popup);
 }
 
@@ -2138,12 +2516,12 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
 
     let search_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(bold(app.theme.mauve))
+        .border_style(bold(app.theme.accent))
         .title(Span::styled(
-            "  \u{f422} Fuzzy Find  [Esc cancel  \u{2191}\u{2193} navigate  Enter jump]  ",
-            bold(app.theme.subtext),
+            format!("  {} Fuzzy Find  [Esc cancel  ↑↓ navigate  Enter jump]  ", app.icons.chrome.search_icon),
+            bold(app.theme.fg_dim),
         ))
-        .style(st_bg(app.theme.text, app.theme.base));
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
 
     // Live count — always shows current number even while streaming
     let count_str = if app.fuzzy_loading {
@@ -2152,10 +2530,10 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
         format!("  {} matches", app.fuzzy_results.len())
     };
     let search_text = Line::from(vec![
-        Span::styled("  ", st(app.theme.overlay0)),
-        Span::styled(&app.fuzzy_query, bold(app.theme.text)),
-        Span::styled("\u{2588}", bold(app.theme.mauve)),
-        Span::styled(&count_str, st(app.theme.overlay0)),
+        Span::styled("  ", st(app.theme.fg_muted)),
+        Span::styled(&app.fuzzy_query, bold(app.theme.fg_primary)),
+        Span::styled(&app.icons.chrome.cursor_block, bold(app.theme.accent)),
+        Span::styled(&count_str, st(app.theme.fg_muted)),
     ]);
     f.render_widget(Paragraph::new(search_text).block(search_block), inner[0]);
 
@@ -2170,17 +2548,17 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
         .map(|(i, path)| {
             let k    = file_kind(path);
             let c    = kind_color(&k, &app.theme);
-            let ic   = file_icon(path, &k, &app.icon_set);
+            let ic   = app.icons.file_icon(path, &k);
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let rel  = path.strip_prefix(&app.tab().cwd)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string_lossy().into_owned());
             let is_cur = i == cursor;  // i is the absolute index, cursor is absolute — correct
-            let ns = if is_cur { bold_bg(app.theme.base, app.theme.mauve) } else { st(c) };
-            let ps = if is_cur { st_bg(app.theme.overlay0, app.theme.mauve) } else { st(app.theme.overlay0) };
-            let prefix = if is_cur { " \u{f0da} " } else { "   " };
+            let ns = if is_cur { bold_bg(app.theme.bg_primary, app.theme.accent) } else { st(c) };
+            let ps = if is_cur { st_bg(app.theme.fg_muted, app.theme.accent) } else { st(app.theme.fg_muted) };
+            let prefix = if is_cur { format!(" {} ", app.icons.chrome.cursor_arrow) } else { "   ".to_string() };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, if is_cur { bold(app.theme.mauve) } else { st(app.theme.surface1) }),
+                Span::styled(prefix, if is_cur { bold(app.theme.accent) } else { st(app.theme.bg_popup) }),
                 Span::styled(format!("{} ", ic), ns),
                 Span::styled(name, ns),
                 Span::styled(format!("  {}", rel), ps),
@@ -2189,8 +2567,8 @@ fn draw_fuzzy_overlay(f: &mut Frame, app: &App, rect: Rect) {
 
     let list_block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_style(st(app.theme.surface1))
-        .style(st_bg(app.theme.text, app.theme.base));
+        .border_style(st(app.theme.bg_popup))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(List::new(items).block(list_block), inner[1]);
 }
 
@@ -2203,6 +2581,7 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         InputMode::Normal | InputMode::Settings => {}
         InputMode::FuzzySearch => { handle_fuzzy_key(app, key, mods); return false; }
         InputMode::Rename(_)|InputMode::NewFile|InputMode::NewDir => { handle_input_key(app, key); return false; }
+        InputMode::RunArgs(..) => { handle_runargs_key(app, key); return false; }
         InputMode::Confirm => {
             app.mode = InputMode::Normal;
             if matches!(key, KeyCode::Char('y')|KeyCode::Char('Y')) { app.delete_files(); }
@@ -2211,6 +2590,15 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         InputMode::Help => {
             if matches!(key, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')) {
                 app.mode = InputMode::Normal;
+            }
+            return false;
+        }
+        InputMode::Extracting => {
+            // Esc cancels (best-effort — process may still finish in bg)
+            if key == KeyCode::Esc {
+                app.extract_rx       = None;
+                app.extract_progress = None;
+                app.mode             = InputMode::Normal;
             }
             return false;
         }
@@ -2287,7 +2675,7 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
     if app.settings.dropdown {
         let items  = SettingsState::section_items(&app.settings.section);
         let (k, _) = items[app.settings.cursor];
-        let opts   = SettingsState::dropdown_options(k, &app.user_themes).unwrap_or_default();
+        let opts   = SettingsState::dropdown_options(k).unwrap_or_default();
         match key {
             KeyCode::Esc => { app.settings.dropdown = false; }
             KeyCode::Up  => { if app.settings.dd_cursor > 0 { app.settings.dd_cursor -= 1; } }
@@ -2298,8 +2686,8 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
                 app.settings.dropdown = false;
                 app.settings.dirty    = true;
                 // Apply theme/icon live immediately
-                app.theme    = Theme::resolve(&app.cfg.theme, &app.user_themes);
-                app.icon_set = IconSet::by_name(&app.cfg.icon_set);
+                app.theme = Theme::load(&app.cfg.theme);
+                app.icons = IconData::load(&app.cfg.icon_set);
             }
             _ => {}
         }
@@ -2348,10 +2736,10 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
             let (k, _) = items[app.settings.cursor];
             if k.starts_with("fixed_") {
                 // Fixed keys are informational — not configurable
-            } else if SettingsState::dropdown_options(k, &app.user_themes).is_some() {
+            } else if SettingsState::dropdown_options(k).is_some() {
                 // Open dropdown — pre-select current value
                 let cur_val = SettingsState::get_value(k, &app.cfg);
-                let opts    = SettingsState::dropdown_options(k, &app.user_themes).unwrap();
+                let opts    = SettingsState::dropdown_options(k).unwrap();
                 app.settings.dd_cursor = opts.iter().position(|o| o == &cur_val).unwrap_or(0);
                 app.settings.dropdown  = true;
             } else {
@@ -2364,9 +2752,8 @@ fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> bool
                 Ok(_)  => {
                     app.settings.dirty = false;
                     // Reload user themes in case themes.json was edited externally
-                    app.user_themes = UserThemeEntry::load_all();
-                    app.theme    = Theme::resolve(&app.cfg.theme, &app.user_themes);
-                    app.icon_set = IconSet::by_name(&app.cfg.icon_set);
+                                        app.theme = Theme::load(&app.cfg.theme);
+                    app.icons = IconData::load(&app.cfg.icon_set);
                     app.msg("Settings saved", false);
                 }
                 Err(e) => { app.msg(&format!("Save error: {}",e),true); }
@@ -2385,6 +2772,79 @@ fn handle_fuzzy_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         KeyCode::Down  => { if app.fuzzy_cursor+1<app.fuzzy_results.len(){app.fuzzy_cursor+=1;} }
         KeyCode::Backspace => { app.fuzzy_query.pop(); app.fuzzy_update_results(); }
         KeyCode::Char(c)   => { app.fuzzy_query.push(c); app.fuzzy_update_results(); }
+        _ => {}
+    }
+}
+
+fn handle_runargs_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => {
+            app.mode = InputMode::Normal;
+            app.input_buf.clear();
+        }
+        KeyCode::Tab => {
+            // Toggle between append (args after exe) and prepend (args before exe)
+            if let InputMode::RunArgs(ref _p, ref mut prepend) = app.mode {
+                *prepend = !*prepend;
+            }
+        }
+        KeyCode::Enter => {
+            let args_str = app.input_buf.clone();
+            let (path, prepend) = match std::mem::replace(&mut app.mode, InputMode::Normal) {
+                InputMode::RunArgs(p, pre) => (p, pre),
+                _ => return,
+            };
+            app.input_buf.clear();
+
+            let cfg  = app.cfg.clone();
+            let term = cfg.opener_terminal.clone();
+            let ext  = path.extension().and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase()).unwrap_or_default();
+            let is_script = matches!(ext.as_str(), "sh"|"bash"|"zsh"|"fish");
+            let is_exec = {
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                }
+                #[cfg(not(unix))] { false }
+            };
+            let path_escaped = path.to_string_lossy().replace("'", "'\\''");
+
+            // Build the base command (interpreter + path, or just path)
+            let base_cmd = if is_script && !is_exec {
+                match ext.as_str() {
+                    "fish" => format!("fish '{}'", path_escaped),
+                    "zsh"  => format!("zsh '{}'",  path_escaped),
+                    "bash" => format!("bash '{}'", path_escaped),
+                    _      => format!("sh '{}'",   path_escaped),
+                }
+            } else {
+                format!("'{}'", path_escaped)
+            };
+
+            // Combine with user args
+            let run_cmd = if args_str.is_empty() {
+                base_cmd
+            } else if prepend {
+                format!("{} {}", args_str, base_cmd)
+            } else {
+                format!("{} {}", base_cmd, args_str)
+            };
+
+            let full_cmd = format!("{}; echo; echo '-- Press Enter to close --'; read _", run_cmd);
+            let work_dir = path.parent().unwrap_or(std::path::Path::new("/")).to_path_buf();
+            let _ = Command::new(&term)
+                .args(["--", "sh", "-c", &full_cmd])
+                .current_dir(&work_dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn();
+            app.msg(&format!("Running {} in terminal",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false);
+        }
+        KeyCode::Backspace => { app.input_buf.pop(); }
+        KeyCode::Char(c)   => app.input_buf.push(c),
         _ => {}
     }
 }
@@ -2444,7 +2904,6 @@ fn main() -> Result<()> {
     let backend  = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
     let mut app  = App::new(start, cfg);
-
     loop {
         term.draw(|f| ui(f, &mut app))?;
         app.tick();
@@ -2469,6 +2928,8 @@ fn main() -> Result<()> {
     }
 
     disable_raw_mode()?;
+    // Restore terminal default background color on exit
+    let _ = write!(term.backend_mut(), "\x1b]111\x07");
     execute!(term.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     term.show_cursor()?;
     Ok(())

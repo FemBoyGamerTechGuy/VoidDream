@@ -1,0 +1,70 @@
+# Maintainer: FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>
+pkgname=voiddream
+pkgver=0.1.2
+pkgrel=1
+pkgdesc="A dreamy void-themed TUI file manager built with Rust and Ratatui"
+arch=('x86_64' 'aarch64')
+url="https://github.com/FemBoyGamerTechGuy/VoidDream"
+license=('GPL-3.0-or-later')
+depends=('gcc-libs')
+optdepends=(
+    'ffmpeg: video thumbnails'
+    'chafa: image preview fallback'
+    'mpv: video and audio playback'
+    'neovim: text editor integration'
+    'unrar: .rar extraction'
+    'unzip: .zip extraction'
+    'p7zip: .7z extraction'
+    'zstd: .zst and .tar.zst extraction'
+)
+makedepends=('rust' 'cargo' 'git')
+source=("$pkgname::git+https://github.com/FemBoyGamerTechGuy/VoidDream.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    local ver
+    ver="$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+    printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release
+}
+
+package() {
+    cd "$pkgname"
+
+    # Binary
+    install -Dm755 target/release/VoidDream \
+        "$pkgdir/usr/bin/VoidDream"
+
+    # Themes
+    install -dm755 "$pkgdir/usr/share/VoidDream/themes"
+    install -Dm644 themes/*.json \
+        "$pkgdir/usr/share/VoidDream/themes/"
+
+    # Icon sets
+    install -dm755 "$pkgdir/usr/share/VoidDream/icons"
+    install -Dm644 icons/*.json \
+        "$pkgdir/usr/share/VoidDream/icons/"
+
+    # Desktop entry
+    if [[ -f assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop ]]; then
+        install -Dm644 assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
+            "$pkgdir/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop"
+    fi
+
+    # License
+    install -Dm644 LICENSE \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
