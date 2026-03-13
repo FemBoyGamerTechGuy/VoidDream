@@ -2,38 +2,31 @@
 
 ## Supported formats
 
-| Format | Script | Distros |
-|--------|--------|---------|
-| Arch/Artix | `PKGBUILD` | Arch, Artix, Manjaro, EndeavourOS, and derivatives |
-| `.deb` | `build-deb.sh` | Debian, Ubuntu, Linux Mint, Pop!_OS, and derivatives |
-| `.rpm` | `build-rpm.sh` | Fedora, RHEL, CentOS Stream, AlmaLinux, Rocky, openSUSE |
+| Format | Tool | Distros |
+|--------|------|---------|
+| Arch/Artix | `PKGBUILD` + `makepkg` | Arch, Artix, Manjaro, EndeavourOS, and derivatives |
+| `.deb` | `cargo-deb` | Debian, Ubuntu, Linux Mint, Pop!_OS, and derivatives |
+| `.rpm` | `cargo-generate-rpm` | Fedora, RHEL, CentOS Stream, AlmaLinux, Rocky, openSUSE |
 
 ---
 
 ## Prerequisites
 
 ### Rust toolchain
+
+**Arch/Artix:**
 ```bash
-# Arch/Artix
 sudo pacman -S rust
-
-# Debian/Ubuntu
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Fedora
-sudo dnf install rust cargo
 ```
 
-### Package build tools
-
-**Debian/Ubuntu** (for `.deb`):
+**Debian/Ubuntu:**
 ```bash
-sudo apt install dpkg-dev
+sudo apt install rustc cargo gcc
 ```
 
-**Fedora/RHEL** (for `.rpm`):
+**Fedora/RHEL:**
 ```bash
-sudo dnf install rpm-build
+sudo dnf install rust cargo gcc
 ```
 
 ---
@@ -53,8 +46,10 @@ git clone https://github.com/FemBoyGamerTechGuy/VoidDream
 cd VoidDream
 chmod +x packaging/build-deb.sh
 ./packaging/build-deb.sh
-sudo dpkg -i voiddream_*.deb
+sudo dpkg -i target/debian/VoidDream_*.deb
 ```
+
+> `cargo-deb` will be installed automatically if not present.
 
 ### Fedora / RHEL
 ```bash
@@ -62,8 +57,10 @@ git clone https://github.com/FemBoyGamerTechGuy/VoidDream
 cd VoidDream
 chmod +x packaging/build-rpm.sh
 ./packaging/build-rpm.sh
-sudo dnf install ./voiddream-*.rpm
+sudo dnf install ./target/generate-rpm/VoidDream-*.rpm
 ```
+
+> `cargo-generate-rpm` will be installed automatically if not present.
 
 ---
 
@@ -76,8 +73,6 @@ All three package formats install the same files:
 | `VoidDream` binary | `/usr/bin/VoidDream` |
 | Theme JSON files | `/usr/share/VoidDream/themes/` |
 | Icon set JSON files | `/usr/share/VoidDream/icons/` |
-| Desktop entry | `/usr/share/applications/` |
-| License | `/usr/share/licenses/voiddream/` |
 
 ---
 
@@ -91,7 +86,7 @@ sudo pacman -R voiddream
 sudo apt remove voiddream
 
 # Fedora / RHEL
-sudo dnf remove voiddream
+sudo dnf remove VoidDream
 ```
 
 ---
@@ -108,7 +103,7 @@ All optional — the app works without them but loses certain features.
 | `neovim` | Text editor integration |
 | `unrar` | `.rar` extraction |
 | `unzip` | `.zip` extraction |
-| `p7zip` | `.7z` extraction |
+| `p7zip` / `p7zip-full` | `.7z` extraction |
 | `zstd` | `.zst` / `.tar.zst` extraction |
 
 > `tar`, `gzip`, `bzip2` and `xz` are part of the base system and always present.

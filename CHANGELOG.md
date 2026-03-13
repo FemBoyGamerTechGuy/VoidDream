@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.3] - 2026-03-13
+
+### Added
+- `tokyo-night-light` theme
+
+### Changed
+- Icon sets (`nerdfont`, `emoji`, `minimal`, `none`) now fully data-driven via JSON files in `icons/`
+- NerdFont icon set expanded — added Nix, Zig, Swift, Dart, Julia, Haskell, Erlang, SQL, torrent, patch/diff, Blender, STL, Jupyter and more
+- NerdFont `by_name` expanded — added `docker-compose.yml/yaml`, `yarn.lock`, `license`, `flake.nix`, `shell.nix`, `default.nix`, `.env`, `.env.local`, `.env.example`
+- NerdFont named directories expanded — added `build`, `dist`, `docs`, `assets`, `data`, `logs`, `config`, `test`, `venv`, `vendor`, `backup`, `migrations`, `cache`, `snap`, `flatpak`
+- Emoji icon set `by_name` now includes shell config files (`.bashrc`, `.zshrc`, etc.)
+- Packaging now correctly bundles all themes and icon sets into `/usr/share/VoidDream/` for `.deb`, `.rpm` and Arch `PKGBUILD`
+- Build scripts updated to use `cargo-deb` and `cargo-generate-rpm`
+
+### Removed
+- `btop-dark` theme
+- `btop-default` theme
+
+---
+
 ## [0.1.2] - 2026-03-12
 
 ### Added

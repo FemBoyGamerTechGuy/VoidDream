@@ -39,7 +39,7 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 | 🔍 | **Fuzzy search** with live streaming results |
 | 🖼️ | **Image & video preview** |
 | 🕐 | **Live clock** in tab bar with toggleable file date/time column |
-| 🎨 | **23 built-in themes** + community theme support |
+| 🎨 | **21 built-in themes** + community theme support |
 | 🔤 | **Nerd Font, Emoji, Minimal and None** icon sets |
 | ⌨️ | **Fully configurable keybinds** |
 | 📂 | **Configurable file openers** per file type |
@@ -100,7 +100,7 @@ All configurable keybinds can be changed from the settings UI — press `:` to o
 
 Themes live in `~/.local/share/VoidDream/themes/` as JSON files and are loaded automatically on launch. Drop any `.json` file there and it will appear in the Settings theme picker instantly.
 
-**23 built-in themes** including Catppuccin (all four flavours), Dracula, Tokyo Night, Nord, Gruvbox, Rosé Pine, Everforest, Kanagawa and more.
+**21 built-in themes** including Catppuccin (all four flavours), Dracula, Tokyo Night, Nord, Gruvbox, Rosé Pine, Everforest, Kanagawa and more.
 
 For the full theme JSON format and icon reference, see [THEMING.md](THEMING.md).
 
@@ -133,8 +133,6 @@ VoidDream/
 │   └── 2026-03-12-220059_hyprshot.png
 ├── themes/
 │   ├── ayu-dark.json
-│   ├── btop-dark.json
-│   ├── btop-default.json
 │   ├── catppuccin-frappe.json
 │   ├── catppuccin-latte.json
 │   ├── catppuccin-macchiato.json
@@ -160,7 +158,6 @@ VoidDream/
 ├── CONTRIBUTING.md
 ├── Cargo.toml
 ├── LICENSE
-├── Makefile
 ├── README.md
 └── THEMING.md
 ```
