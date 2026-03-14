@@ -1135,15 +1135,19 @@ struct App {
     fuzzy_loading: bool,
     fuzzy_rx:      Option<mpsc::Receiver<PathBuf>>,
     last_preview_size: (u16, u16),
-    // Image preview
+    // Image preview — loaded in background thread
     img_picker:   Option<Picker>,
-    img_path:     Option<PathBuf>,
+    img_path:     Option<PathBuf>,       // path currently displayed
+    img_pending:  Option<PathBuf>,       // path queued to load
     img_state:    Option<StatefulProtocol>,
+    img_rx:       Option<mpsc::Receiver<image::DynamicImage>>,
+    img_debounce: Option<Instant>,       // delay before spawning load
     // Video thumbnail preview
     vid_thumb_path:  Option<PathBuf>,   // source video path
     vid_thumb_file:  Option<PathBuf>,   // temp PNG on disk
     vid_thumb_state: Option<StatefulProtocol>,
     vid_thumb_rx:    Option<mpsc::Receiver<PathBuf>>, // signals thumb is ready
+    vid_debounce:    Option<Instant>,   // delay before spawning ffmpeg
     // Live clock string, updated every tick
     clock_str:    String,
     // Archive extraction progress
@@ -1169,11 +1173,15 @@ impl App {
             last_preview_size: (0, 0),
             img_picker: Picker::from_query_stdio().ok(),
             img_path: None,
+            img_pending: None,
             img_state: None,
+            img_rx: None,
+            img_debounce: None,
             vid_thumb_path: None,
             vid_thumb_file: None,
             vid_thumb_state: None,
             vid_thumb_rx: None,
+            vid_debounce: None,
             clock_str: current_time_str(),
             extract_progress: None,
             extract_rx: None,
@@ -1259,9 +1267,12 @@ impl App {
             .and_then(|e| e.to_str())
             .map(|e| IMAGE_EXT.contains(&e.to_lowercase().as_str()))
             .unwrap_or(false);
-        if !is_image && self.img_state.is_some() {
-            self.img_path  = None;
-            self.img_state = None;
+        if !is_image && (self.img_state.is_some() || self.img_rx.is_some()) {
+            self.img_path     = None;
+            self.img_pending  = None;
+            self.img_state    = None;
+            self.img_rx       = None;
+            self.img_debounce = None;
         }
 
         // Clear video thumbnail state if we've navigated away from a video
@@ -1271,12 +1282,29 @@ impl App {
             .map(|e| VIDEO_EXT.contains(&e.to_lowercase().as_str()))
             .unwrap_or(false);
         if !is_video {
-            if self.vid_thumb_state.is_some() || self.vid_thumb_rx.is_some() {
-                // Clean up temp file
+            if self.vid_thumb_state.is_some() || self.vid_thumb_rx.is_some() || self.vid_debounce.is_some() {
                 if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(f); }
                 self.vid_thumb_path  = None;
                 self.vid_thumb_state = None;
                 self.vid_thumb_rx    = None;
+                self.vid_debounce    = None;
+            }
+        }
+
+        // Drain image load channel
+        if self.img_rx.is_some() {
+            let done = if let Some(rx) = &self.img_rx {
+                match rx.try_recv() {
+                    Ok(img)                               => Some(img),
+                    Err(mpsc::TryRecvError::Disconnected) => { self.img_rx = None; None }
+                    Err(mpsc::TryRecvError::Empty)        => None,
+                }
+            } else { None };
+            if let Some(img) = done {
+                self.img_rx = None;
+                if let Some(picker) = self.img_picker.as_mut() {
+                    self.img_state = Some(picker.new_resize_protocol(img));
+                }
             }
         }
 
@@ -1286,7 +1314,6 @@ impl App {
                 match rx.try_recv() {
                     Ok(thumb_path) => Some(thumb_path),
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        // ffmpeg failed — show nothing, clean up
                         if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(f); }
                         self.vid_thumb_rx = None;
                         None
@@ -1299,6 +1326,9 @@ impl App {
                 self.vid_thumb_rx = None;
                 if let Some(picker) = self.img_picker.as_mut() {
                     if let Ok(img) = image::open(&thumb_path) {
+                        // Delete temp file immediately after loading into memory
+                        let _ = fs::remove_file(&thumb_path);
+                        self.vid_thumb_file = None;
                         self.vid_thumb_state = Some(picker.new_resize_protocol(img));
                     }
                 }
@@ -1353,10 +1383,10 @@ impl App {
         if path.is_dir() { self.tab_mut().enter(); return; }
         let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
         let ext = ext.as_str(); let cfg = self.cfg.clone();
-        if IMAGE_EXT.contains(&ext)        { let _ = Command::new(&cfg.opener_image).arg(&path).spawn(); }
-        else if VIDEO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_video).arg(&path).spawn(); }
-        else if AUDIO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_audio).arg(&path).spawn(); }
-        else if DOC_EXT.contains(&ext)     { let _ = Command::new(&cfg.opener_doc).arg(&path).spawn(); }
+        if IMAGE_EXT.contains(&ext)        { let _ = Command::new(&cfg.opener_image).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
+        else if VIDEO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_video).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
+        else if AUDIO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_audio).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
+        else if DOC_EXT.contains(&ext)     { let _ = Command::new(&cfg.opener_doc).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
         else if JAR_EXT.contains(&ext)     {
             // New terminal window — stdout/stderr visible to user, TUI never touched
             let term = cfg.opener_terminal.clone();
@@ -1568,32 +1598,46 @@ impl App {
     /// Spawn a background thread that runs ffmpeg to extract a thumbnail frame.
     /// Sends the output path on the channel when done; App::tick() picks it up.
     fn spawn_video_thumb(&mut self, video: PathBuf) {
-        // Already generating or already have thumb for this file
+        // Already displaying or already generating for this file
         if self.vid_thumb_path.as_deref() == Some(&video) { return; }
 
-        // Clean up previous thumb file if any
+        // Debounce — only start ffmpeg after 150ms of hovering on the same file
+        match self.vid_debounce {
+            None => {
+                self.vid_debounce = Some(Instant::now());
+                return;
+            }
+            Some(t) if t.elapsed() < Duration::from_millis(150) => return,
+            _ => { self.vid_debounce = None; }
+        }
+
+        // Cancel any in-flight generation and clean up
         if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(&f); }
         self.vid_thumb_state = None;
         self.vid_thumb_path  = Some(video.clone());
 
-        // Write thumb to a temp file
-        let tmp = env::temp_dir().join(format!(
-            "voiddream_thumb_{}.png",
-            video.file_name().and_then(|n| n.to_str()).unwrap_or("v")
-        ));
+        // Use a hash of the full path as the temp filename to avoid collisions
+        let hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            video.hash(&mut h);
+            h.finish()
+        };
+        let tmp = env::temp_dir().join(format!("voiddream_thumb_{:x}.png", hash));
         self.vid_thumb_file = Some(tmp.clone());
 
         let (tx, rx) = mpsc::channel();
         self.vid_thumb_rx = Some(rx);
 
         std::thread::spawn(move || {
-            // ffmpeg -y -i <video> -ss 00:00:03 -vframes 1 -vf scale=640:-1 <thumb>
             let status = Command::new("ffmpeg")
                 .args([
                     "-y", "-i", &video.to_string_lossy(),
-                    "-ss", "00:00:03",
+                    "-ss", "00:00:02",
                     "-vframes", "1",
-                    "-vf", "scale=640:-1",
+                    "-vf", "scale=320:-1",   // smaller = faster decode
+                    "-q:v", "5",              // faster JPEG-quality encode
                     &tmp.to_string_lossy(),
                 ])
                 .stdout(std::process::Stdio::null())
@@ -1602,7 +1646,41 @@ impl App {
             if status.map(|s| s.success()).unwrap_or(false) && tmp.exists() {
                 let _ = tx.send(tmp);
             }
-            // If ffmpeg fails, tx drops → Disconnected signals failure in tick()
+        });
+    }
+
+    fn spawn_image_load(&mut self, path: PathBuf) {
+        // Already showing this image
+        if self.img_path.as_deref() == Some(&path) { return; }
+
+        // Debounce — only load after 150ms of hovering
+        match self.img_debounce {
+            None => {
+                self.img_debounce = Some(Instant::now());
+                self.img_pending  = Some(path);
+                return;
+            }
+            Some(t) if t.elapsed() < Duration::from_millis(150) => {
+                self.img_pending = Some(path); // update target but keep waiting
+                return;
+            }
+            _ => { self.img_debounce = None; }
+        }
+
+        // Only load the pending path (latest hovered file)
+        let target = self.img_pending.take().unwrap_or(path);
+        if self.img_path.as_deref() == Some(&target) { return; }
+
+        self.img_path  = Some(target.clone());
+        self.img_state = None;
+
+        let (tx, rx) = mpsc::channel();
+        self.img_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            if let Ok(img) = image::open(&target) {
+                let _ = tx.send(img);
+            }
         });
     }
 
@@ -1875,7 +1953,13 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         .title(Span::styled(title, bold(app.theme.border)))
         .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
 
-    let mut state = app.tab().state.clone();
+    let mut state = ListState::default();
+    if let Some(sel) = app.tab().state.selected() {
+        let scroll = app.tab().scroll;
+        if sel >= scroll {
+            state.select(Some(sel - scroll));
+        }
+    }
     f.render_stateful_widget(List::new(items).block(block), rect, &mut state);
 }
 
@@ -1916,18 +2000,9 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
     let content_rect = inner[1];
     let ch = content_rect.height as usize;
 
-    // Image preview
+    // Image preview — non-blocking, loaded in background thread
     if IMAGE_EXT.contains(&ext.as_str()) {
-        let needs_load = app.img_path.as_deref() != Some(&current);
-        if needs_load {
-            app.img_path  = Some(current.clone());
-            app.img_state = None;
-            if let Some(picker) = app.img_picker.as_mut() {
-                if let Ok(img) = image::open(&current) {
-                    app.img_state = Some(picker.new_resize_protocol(img));
-                }
-            }
-        }
+        app.spawn_image_load(current.clone());
         if let Some(state) = app.img_state.as_mut() {
             StatefulImage::new().render(content_rect, f.buffer_mut(), state);
         } else {

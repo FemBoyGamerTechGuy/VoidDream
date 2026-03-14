@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.4] - 2026-03-14
+
+### Fixed
+- GUI openers (image, video, audio, doc) no longer bleed into the TUI
+- File list cursor no longer goes out of bounds when scrolling up
+- Thumbnail fetching is now non-blocking — image loading moved to a background thread
+- Added 150ms debounce to image and video preview to avoid loading every file scrolled past
+- Video thumbnails now use a hash-based temp filename to avoid collisions between same-named files in different directories
+- Temp thumbnail file is now deleted immediately after being loaded into memory
+
+---
+
 ## [0.1.3] - 2026-03-13
 
 ### Added
