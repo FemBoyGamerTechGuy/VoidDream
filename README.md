@@ -53,6 +53,10 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 
 See **[packaging/README.md](packaging/README.md)**.
 
+### Runtime apps
+
+See **[scripts/README.md](scripts/README.md)**.
+
 ---
 
 ## Configuration
@@ -153,6 +157,11 @@ VoidDream/
 │   ├── tokyo-night-light.json
 │   ├── tokyo-night-storm.json
 │   └── tokyo-night.json
+├── scripts/
+│   ├── README.md
+│   ├── install-deps-arch.sh
+│   ├── install-deps-debian.sh
+│   └── install-deps-fedora.sh
 ├── .gitignore
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
