@@ -34,9 +34,11 @@ fi
 if command -v apt-get &>/dev/null; then
     echo "==> Checking build dependencies (Debian/Ubuntu)..."
     MISSING=()
-    dpkg -s chafa       &>/dev/null || MISSING+=(chafa)
-    dpkg -s libchafa-dev &>/dev/null || MISSING+=(libchafa-dev)
-    dpkg -s pkg-config  &>/dev/null || MISSING+=(pkg-config)
+    dpkg -s chafa          &>/dev/null || MISSING+=(chafa)
+    dpkg -s libchafa-dev   &>/dev/null || MISSING+=(libchafa-dev)
+    dpkg -s pkg-config     &>/dev/null || MISSING+=(pkg-config)
+    dpkg -s libglib2.0-dev &>/dev/null || MISSING+=(libglib2.0-dev)
+    dpkg -s dpkg-dev       &>/dev/null || MISSING+=(dpkg-dev)
     if [ ${#MISSING[@]} -gt 0 ]; then
         echo "  Installing: ${MISSING[*]}"
         sudo apt-get install -y "${MISSING[@]}"
@@ -90,5 +92,5 @@ $BUILD_DEB && find target/debian       -name "*.deb" -exec echo "  {}" \;
 $BUILD_RPM && find target/generate-rpm -name "*.rpm" -exec echo "  {}" \;
 echo ""
 echo "Install:"
-$BUILD_DEB && echo "  Debian/Ubuntu:  sudo dpkg -i target/debian/VoidDream_*.deb"
+$BUILD_DEB && echo "  Debian/Ubuntu:  sudo dpkg -i target/debian/voiddream_*.deb"
 $BUILD_RPM && echo "  Fedora/RHEL:    sudo dnf install ./target/generate-rpm/VoidDream-*.rpm"

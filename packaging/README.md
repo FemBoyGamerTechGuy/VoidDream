@@ -16,7 +16,7 @@
 
 **Debian/Ubuntu:**
 ```bash
-sudo apt install rustc cargo gcc chafa libchafa-dev pkg-config
+sudo apt install rustc cargo gcc chafa libchafa-dev pkg-config libglib2.0-dev dpkg-dev
 ```
 
 **Fedora/RHEL:**
@@ -44,7 +44,7 @@ git clone https://github.com/FemBoyGamerTechGuy/VoidDream
 cd VoidDream
 chmod +x packaging/build-deb.sh
 ./packaging/build-deb.sh
-sudo dpkg -i target/debian/VoidDream_*.deb
+sudo dpkg -i target/debian/voiddream_*.deb
 ```
 
 > `cargo-deb` will be installed automatically if not present.

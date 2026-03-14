@@ -16,9 +16,11 @@ fi
 # ── Build dependencies ────────────────────────────────────────────────────────
 echo "==> Checking build dependencies..."
 MISSING=()
-dpkg -s chafa        &>/dev/null || MISSING+=(chafa)
-dpkg -s libchafa-dev &>/dev/null || MISSING+=(libchafa-dev)
-dpkg -s pkg-config   &>/dev/null || MISSING+=(pkg-config)
+dpkg -s chafa          &>/dev/null || MISSING+=(chafa)
+dpkg -s libchafa-dev   &>/dev/null || MISSING+=(libchafa-dev)
+dpkg -s pkg-config     &>/dev/null || MISSING+=(pkg-config)
+dpkg -s libglib2.0-dev &>/dev/null || MISSING+=(libglib2.0-dev)
+dpkg -s dpkg-dev       &>/dev/null || MISSING+=(dpkg-dev)
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "==> Installing missing build dependencies: ${MISSING[*]}"
