@@ -17,7 +17,7 @@ optdepends=(
     'p7zip: .7z extraction'
     'zstd: .zst and .tar.zst extraction'
 )
-makedepends=('rust' 'cargo' 'git')
+makedepends=('rust' 'cargo' 'git' 'chafa' 'pkgconf')
 source=("$pkgname::git+https://github.com/FemBoyGamerTechGuy/VoidDream.git")
 sha256sums=('SKIP')
 
