@@ -1,6 +1,6 @@
 [package]
 name = "VoidDream"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A dreamy void-themed TUI file manager built with Rust and Ratatui"
 authors = ["FemBoyGamerTechGuy"]
@@ -16,7 +16,7 @@ path = "src/main.rs"
 ratatui       = "0.30"
 crossterm     = { version = "0.29", features = ["event-stream"] }
 ratatui-image = { version = "10", features = ["crossterm"] }
-image         = { version = "0.25", default-features = false, features = ["png","jpeg","gif","bmp","webp","ico","tiff"] }
+image         = { version = "0.25", default-features = false, features = ["png","jpeg","gif","bmp","webp","ico","tiff","avif","hdr","exr","pnm","ff","qoi","rayon"] }
 anyhow        = "1"
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
