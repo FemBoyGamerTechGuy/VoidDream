@@ -9,6 +9,23 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
     }
     match &app.mode {
         InputMode::Normal | InputMode::Settings => {}
+        InputMode::DriveManager => {
+            match key {
+                KeyCode::Esc => { app.mode = InputMode::Normal; }
+                KeyCode::Up   | KeyCode::Char('k') => {
+                    if app.drive_cursor > 0 { app.drive_cursor -= 1; }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if app.drive_cursor + 1 < app.drive_devices.len() { app.drive_cursor += 1; }
+                }
+                KeyCode::Char('m') => { app.drive_mount(); }
+                KeyCode::Char('u') => { app.drive_unmount(); }
+                KeyCode::Char('r') => { app.drive_devices = crate::drives::list_devices(); }
+                KeyCode::Enter     => { app.drive_navigate(); }
+                _ => {}
+            }
+            return false;
+        }
         InputMode::FuzzySearch => { handle_fuzzy_key(app, key, mods); return false; }
         InputMode::Rename(_)|InputMode::NewFile|InputMode::NewDir => { handle_input_key(app, key); return false; }
         InputMode::RunArgs(..) => { handle_runargs_key(app, key); return false; }
@@ -20,8 +37,25 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             return false;
         }
         InputMode::Help => {
-            if matches!(key, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')) {
-                app.mode = InputMode::Normal;
+            match key {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                    app.mode = InputMode::Normal;
+                    app.help_scroll = 0;
+                }
+                KeyCode::Up   | KeyCode::Char('k') => {
+                    if app.help_scroll > 0 { app.help_scroll -= 1; }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.help_scroll = app.help_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    app.help_scroll = app.help_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    app.help_scroll = app.help_scroll.saturating_add(10);
+                }
+                KeyCode::Home => { app.help_scroll = 0; }
+                _ => {}
             }
             return false;
         }
@@ -48,7 +82,6 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         }
     }
     let cfg = &app.cfg;
-    let _ch = match key { KeyCode::Char(c) => Some(c), _ => None };
 
     match key {
         KeyCode::Up        => app.tab_mut().move_cursor(-1),
@@ -69,15 +102,15 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         KeyCode::Char(c) => {
             let s = c.to_string();
             if s == cfg.key_copy {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
                 else { app.yank_files(false); }
             } else if s == cfg.key_cut {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
                 else { app.yank_files(true); }
             } else if s == cfg.key_paste {
                 app.paste_files();
             } else if s == cfg.key_delete {
-                if app.tab().selected.is_empty() { app.msg("Select files first (Space)", true); }
+                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
                 else { app.mode = InputMode::Confirm; }
             } else if s == cfg.key_rename {
                 if let Some(p) = app.tab().current().cloned() {
@@ -93,7 +126,7 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             } else if s == cfg.key_toggle_hidden {
                 let h = !app.tab().show_hidden;
                 app.tab_mut().show_hidden = h; app.tab_mut().refresh();
-                app.msg(if h {"Hidden files shown"} else {"Hidden files hidden"}, false);
+                app.msg(if h { app.lang.msg_hidden_shown } else { app.lang.msg_hidden_hidden }, false);
             } else if s == cfg.key_cycle_tab {
                 app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
             } else if s == cfg.key_new_tab {
@@ -109,6 +142,8 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
                 app.mode = InputMode::Settings;
             } else if c == '?' {
                 app.mode = InputMode::Help;
+            } else if c == 'D' {
+                app.open_drive_manager();
             }
         }
         KeyCode::Esc => return true,
@@ -168,14 +203,16 @@ pub fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> 
         }
         KeyCode::Left => {
             app.settings.section = match app.settings.section {
-                SettingsSection::Behaviour=>SettingsSection::Keybinds, SettingsSection::Appearance=>SettingsSection::Behaviour,
-                SettingsSection::Openers=>SettingsSection::Appearance, SettingsSection::Keybinds=>SettingsSection::Openers,
+                SettingsSection::Behaviour=>SettingsSection::About,     SettingsSection::Appearance=>SettingsSection::Behaviour,
+                SettingsSection::Openers=>SettingsSection::Appearance,  SettingsSection::Keybinds=>SettingsSection::Openers,
+                SettingsSection::About=>SettingsSection::Keybinds,
             }; app.settings.cursor=0;
         }
         KeyCode::Right => {
             app.settings.section = match app.settings.section {
                 SettingsSection::Behaviour=>SettingsSection::Appearance, SettingsSection::Appearance=>SettingsSection::Openers,
-                SettingsSection::Openers=>SettingsSection::Keybinds, SettingsSection::Keybinds=>SettingsSection::Behaviour,
+                SettingsSection::Openers=>SettingsSection::Keybinds,    SettingsSection::Keybinds=>SettingsSection::About,
+                SettingsSection::About=>SettingsSection::Behaviour,
             }; app.settings.cursor=0;
         }
         KeyCode::Enter => {
@@ -197,12 +234,14 @@ pub fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> 
             match app.cfg.save() {
                 Ok(_)  => {
                     app.settings.dirty = false;
-                    // Reload user themes in case themes.json was edited externally
-                                        app.theme = Theme::load(&app.cfg.theme);
+                    app.theme = Theme::load(&app.cfg.theme);
                     app.icons = IconData::load(&app.cfg.icon_set);
-                    app.msg("Settings saved", false);
+                    // Reload language — must happen before msg so the message
+                    // itself uses the newly selected language
+                    app.lang = crate::lang::load(&app.cfg.language);
+                    app.msg(app.lang.msg_settings_saved, false);
                 }
-                Err(e) => { app.msg(&format!("Save error: {}",e),true); }
+                Err(e) => { app.msg(&format!("{}: {}", app.lang.msg_save_error, e), true); }
             }
         }
         _ => {}
@@ -304,8 +343,10 @@ pub fn handle_runargs_key(app: &mut App, key: KeyCode) {
                 .stderr(std::process::Stdio::null())
                 .stdin(std::process::Stdio::null())
                 .spawn();
-            app.msg(&format!("Running {} in terminal",
-                path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false);
+            app.msg(&format!("{} {} {}",
+                app.lang.msg_launching,
+                path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                app.lang.msg_in_terminal), false);
         }
         KeyCode::Backspace => { app.input_buf.pop(); }
         KeyCode::Char(c)   => app.input_buf.push(c),
@@ -343,7 +384,15 @@ pub fn handle_input_key(app: &mut App, key: KeyCode) {
     }
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+/// Spawn a shell command silently (no stdin/stdout/stderr).
+fn spawn_sh_silent(cmd: &str) {
+    let _ = std::process::Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
 
 pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
     match key {
@@ -375,12 +424,7 @@ pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
                         } else {
                             format!("'{}' '{}'", cmd, path_escaped)
                         };
-                        let _ = std::process::Command::new("sh")
-                            .args(["-c", &full_cmd])
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn();
+                        spawn_sh_silent(&full_cmd);
                         app.msg(&format!("Opening with {}", cmd), false);
                     }
                 }
@@ -406,12 +450,7 @@ pub fn handle_openwith_custom_key(app: &mut App, key: KeyCode) {
             if cmd.trim().is_empty() { return; }
             let path_escaped = path.to_string_lossy().replace("'", "'\''");
             let full_cmd = format!("{} '{}'", cmd.trim(), path_escaped);
-            let _ = std::process::Command::new("sh")
-                .args(["-c", &full_cmd])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            spawn_sh_silent(&full_cmd);
             app.msg(&format!("Opening with {}", cmd.trim()), false);
         }
         KeyCode::Backspace => { app.input_buf.pop(); }

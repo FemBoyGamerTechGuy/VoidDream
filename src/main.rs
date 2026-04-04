@@ -1,7 +1,10 @@
 // main.rs — VoidDream entry point
 mod config;
 mod types;
+mod lang;
 mod app;
+mod extract;
+mod drives;
 mod ui;
 mod keys;
 

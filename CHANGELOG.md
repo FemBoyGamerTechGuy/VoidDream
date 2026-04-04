@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.6] - 2026-04-04
+
+### Added
+- **Drive / USB / phone manager** (`Shift+D`) — mount and unmount block devices, USB drives and Android phones directly from VoidDream; uses `udisksctl` for drives (no sudo required) and `gio mount` / `jmtpfs` for MTP phones
+- **Android phone detection via sysfs** — reads `/sys/bus/usb/devices/` directly instead of parsing `jmtpfs -l`; detects any device with a MTP/PTP interface class regardless of mount path
+- **Native archive extraction** — ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, GZ, BZ2, XZ, ZST now extracted using pure Rust crates with no system binaries required; RAR still requires `unrar`
+- **Extraction moved to its own module** (`extract.rs`) — cleaner separation from app logic
+- **Drive manager moved to its own module** (`drives.rs`)
+- **Multilingual UI** — 12 languages selectable from Settings → Behaviour: English (UK), Română, Français, Deutsch, Español, Italiano, Português, Русский, 日本語, 中文, 한국어, العربية; language switches live on save
+- **Settings → About section** — shows app name, version (0.1.6), author, licence and repository
+- **Scrollable help overlay** — `?` help screen now scrolls with `↑/↓`, `j/k`, `PageUp/Down`, `Home`; shows scroll percentage indicator
+
+### Fixed
+- **MTP phone stuttering** — parent and preview pane directory listings are now loaded asynchronously; the render thread never calls `list_dir` directly, eliminating stutter on jmtpfs and other slow FUSE filesystems
+- **fuse filesystem detection** — uses `/proc/mounts` fstype matching (`fuse.jmtpfs`, `fuse.sshfs` etc.) instead of path string heuristics; correctly skips `du` and blocking calls on any FUSE mount regardless of mount point name
+- **Swap and sub-partitions in drive list** — lsblk JSON is now walked recursively so only leaf partition nodes are shown; swap partitions filtered by fstype
+- **`\x20` spaces in lsblk paths** — mount points containing spaces were shown as `\x20`; now decoded correctly
+- **Drive overlay cursor bleeding** — Up/Down in the drive overlay no longer moved the file list cursor behind it; `return false` now consumes all drive overlay events
+- **Double-Enter bug on drive navigate** — pressing Enter to navigate into a drive no longer also triggered `open_current` on the file list
+- **USB drives misclassified as Internal** — fixed classification heuristic; drives mounted under `/run/media/` are always Removable regardless of lsblk hotplug flag
+- **ZIP extraction missing files** — directory entries with a trailing `/` but `is_dir()==false` now correctly created as directories; prevents subsequent files from failing
+- **TAR extraction EPERM errors** — `set_preserve_permissions(false)` and `set_preserve_ownerships(false)` added; extracting archives with root-owned files no longer fails for regular users
+- **RAR silent failure** — stderr is now captured and checked; exit code verified; errors are shown to the user instead of silently swallowed
+- **Date column truncated** — year was cut to 3 digits due to an off-by-one in the column width calculation; fixed
+- **`local_tz_offset_secs` called per tick** — timezone offset is now cached with `OnceLock` after the first `date +%z` call; no longer spawns a subprocess on every clock update
+- **Duplicate HTML preview block** — dead code in the preview pane (unreachable second HTML block) removed
+- **Wrong doc comment on `spawn_folder_size`** — copy-pasted from `spawn_video_thumb`; corrected
+- **"Running in terminal" message not translated** — was hardcoded English; now uses `app.lang`
+- **Hopefully fixed wrong extraction file size display** — progress bar total was sometimes wildly wrong for certain archive formats; reworked size estimation for all formats
+
+### Changed
+- **`human_size_u64` renamed to `si_size`** — clarifies it uses SI base-10 units (matching Nemo/Nautilus) rather than binary
+- **Archive labels in Settings → Openers** — no longer show misleading old command strings; now show `native Rust` or `unrar (system)` to reflect actual implementation
+- **`Config::load` error reporting** — parse errors are now printed to stderr instead of silently falling back to defaults
+- **`spawn_silent` helper extracted** in `app.rs` — five identical `.stdin(null).stdout(null).stderr(null)` spawn chains replaced with a single helper
+- **`spawn_sh_silent` helper extracted** in `keys.rs` — open-with key handlers share a common shell-spawn function
+- **Time/date column** moved immediately after file size (no longer at far right)
+- **Settings** now has five sections: Behaviour, Appearance, Openers, Keybinds, About
+
+---
+
 ## [0.1.5] - 2026-03-21
 
 > ⚠️ **Code freeze** — VoidDream has entered maintenance mode as of this release.

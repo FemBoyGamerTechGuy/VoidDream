@@ -49,9 +49,25 @@ pub struct App {
     pub folder_size_val:      Option<u64>,
     pub folder_size_rx:       Option<mpsc::Receiver<u64>>,
     pub folder_size_debounce: Option<Instant>,
-    // Folder size calculation — async background thread
     // Live clock string, updated every tick
     pub clock_str:    String,
+    // Fuse-mount detection cache — rebuilt at most once per second.
+    // Lets us skip du / blocking list_dir on jmtpfs, sshfs, etc.
+    pub fuse_mounts:      Vec<PathBuf>,
+    pub fuse_mounts_time: Option<Instant>,
+    // Async parent-pane directory load
+    pub parent_load_rx:       Option<mpsc::Receiver<Vec<PathBuf>>>,
+    pub parent_load_path:     Option<PathBuf>,
+    pub parent_load_debounce: Option<Instant>,
+    // Async preview-pane directory load
+    pub preview_load_rx:       Option<mpsc::Receiver<Vec<PathBuf>>>,
+    pub preview_load_path:     Option<PathBuf>,
+    pub preview_load_debounce: Option<Instant>,
+    // Drive manager overlay state
+    pub lang:           &'static crate::lang::Lang,
+    pub drive_devices:  Vec<crate::drives::DriveDevice>,
+    pub drive_cursor:   usize,
+    pub help_scroll:    usize,
     // Archive extraction progress
     pub extract_progress: Option<ExtractionProgress>,
     pub extract_rx:       Option<mpsc::Receiver<ExtractionProgress>>,
@@ -62,6 +78,7 @@ impl App {
         let sh = cfg.show_hidden;
         let icons = IconData::load(&cfg.icon_set);
         let theme = Theme::load(&cfg.theme);
+        let lang  = crate::lang::load(&cfg.language);
         Self {
             theme, icons,
             tabs: vec![Tab::new(start, sh)], tab_idx: 0,
@@ -88,6 +105,12 @@ impl App {
             folder_size_path: None, folder_size_val: None,
             folder_size_rx: None, folder_size_debounce: None,
             clock_str: current_time_str(),
+            fuse_mounts: Vec::new(), fuse_mounts_time: None,
+            parent_load_rx: None, parent_load_path: None, parent_load_debounce: None,
+            preview_load_rx: None, preview_load_path: None, preview_load_debounce: None,
+            lang,
+            drive_devices: Vec::new(), drive_cursor: 0,
+            help_scroll: 0,
             extract_progress: None,
             extract_rx: None,
             extract_child_pid: None,
@@ -120,6 +143,38 @@ impl App {
         }
         // Spawn du once debounce expires
         self.maybe_spawn_folder_size();
+        // Drain async parent-pane dir load
+        if self.parent_load_rx.is_some() {
+            let result = if let Some(rx) = &self.parent_load_rx {
+                match rx.try_recv() {
+                    Ok(entries) => Some(entries),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                }
+            } else { None };
+            if let Some(entries) = result {
+                self.parent_load_rx = None;
+                let tab = &mut self.tabs[self.tab_idx];
+                tab.parent_entries = entries;
+                    }
+        }
+        self.maybe_spawn_parent_load();
+        // Drain async preview-pane dir load
+        if self.preview_load_rx.is_some() {
+            let result = if let Some(rx) = &self.preview_load_rx {
+                match rx.try_recv() {
+                    Ok(entries) => Some(entries),
+                    Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                }
+            } else { None };
+            if let Some(entries) = result {
+                self.preview_load_rx = None;
+                let tab = &mut self.tabs[self.tab_idx];
+                tab.preview_entries = entries;
+                    }
+        }
+        self.maybe_spawn_preview_load();
         // Drain streamed paths — collect into local vec first to avoid borrow conflicts
         if self.fuzzy_loading {
             let mut new_paths: Vec<PathBuf> = Vec::new();
@@ -163,9 +218,9 @@ impl App {
             if let Some(p) = last {
                 if done {
                     if let Some(ref e) = p.error.clone() {
-                        self.msg(&format!("Extract error: {}", e), true);
+                        self.msg(&format!("{}: {}", self.lang.msg_extract_error, e), true);
                     } else {
-                        self.msg(&format!("Extracted {}", p.filename), false);
+                        self.msg(&format!("{} {}", self.lang.msg_extracted, p.filename), false);
                         self.tab_mut().refresh();
                     }
                     self.extract_rx           = None;
@@ -265,14 +320,14 @@ impl App {
         let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
             self.tab().selected.iter().cloned().collect()
         } else if let Some(p) = self.tab().current().cloned() { vec![p] }
-        else { self.msg("Nothing to yank", true); return; };
+        else { self.msg(self.lang.msg_nothing_to_yank, true); return; };
         let n = targets.len();
         self.yank = targets; self.yank_cut = cut;
         self.tab_mut().selected.clear();
-        self.msg(&format!("{} item(s) {}", n, if cut {"cut"} else {"copied"}), false);
+        self.msg(&format!("{} item(s) {}", n, if cut { self.lang.msg_cut } else { self.lang.msg_copied }), false);
     }
     pub fn paste_files(&mut self) {
-        if self.yank.is_empty() { self.msg("Nothing to paste", true); return; }
+        if self.yank.is_empty() { self.msg(self.lang.msg_nothing_to_paste, true); return; }
         let dst = self.tab().cwd.clone(); let mut errors = vec![];
         for src in &self.yank {
             let target = dst.join(src.file_name().unwrap_or_default());
@@ -287,8 +342,8 @@ impl App {
         }
         if self.yank_cut { self.yank.clear(); self.yank_cut = false; }
         self.tab_mut().refresh();
-        if errors.is_empty() { self.msg("Pasted successfully", false); }
-        else { self.msg(&format!("Error: {}", errors[0]), true); }
+        if errors.is_empty() { self.msg(self.lang.msg_pasted, false); }
+        else { self.msg(&format!("{}: {}", self.lang.msg_error, errors[0]), true); }
     }
     pub fn delete_files(&mut self) {
         let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
@@ -301,18 +356,28 @@ impl App {
             if let Err(e) = res { errors.push(e.to_string()); }
         }
         self.tab_mut().selected.clear(); self.tab_mut().refresh();
-        if errors.is_empty() { self.msg(&format!("Deleted {} item(s)", targets.len()), false); }
-        else { self.msg(&format!("Error: {}", errors[0]), true); }
+        if errors.is_empty() { self.msg(&format!("{} {} {}", self.lang.msg_deleted, targets.len(), self.lang.msg_deleted_items), false); }
+        else { self.msg(&format!("{}: {}", self.lang.msg_error, errors[0]), true); }
     }
+    /// Spawn an external program silently (no stdin/stdout/stderr).
+    fn spawn_silent(cmd: &str, arg: &std::path::Path) {
+        let _ = Command::new(cmd)
+            .arg(arg)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
     pub fn open_current(&mut self) {
         let path = match self.tab().current().cloned() { Some(p) => p, None => return };
         if path.is_dir() { self.tab_mut().enter(); return; }
         let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
         let ext = ext.as_str(); let cfg = self.cfg.clone();
-        if IMAGE_EXT.contains(&ext)        { let _ = Command::new(&cfg.opener_image).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
-        else if VIDEO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_video).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
-        else if AUDIO_EXT.contains(&ext)   { let _ = Command::new(&cfg.opener_audio).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
-        else if DOC_EXT.contains(&ext)     { let _ = Command::new(&cfg.opener_doc).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
+        if IMAGE_EXT.contains(&ext)        { Self::spawn_silent(&cfg.opener_image,   &path); }
+        else if VIDEO_EXT.contains(&ext)   { Self::spawn_silent(&cfg.opener_video,   &path); }
+        else if AUDIO_EXT.contains(&ext)   { Self::spawn_silent(&cfg.opener_audio,   &path); }
+        else if DOC_EXT.contains(&ext)     { Self::spawn_silent(&cfg.opener_doc,     &path); }
         else if JAR_EXT.contains(&ext)     {
             // New terminal window — stdout/stderr visible to user, TUI never touched
             let term = cfg.opener_terminal.clone();
@@ -327,9 +392,9 @@ impl App {
                 .stderr(std::process::Stdio::null())
                 .stdin(std::process::Stdio::null())
                 .spawn();
-            self.msg(&format!("Launching {} in terminal", path.file_name().and_then(|n| n.to_str()).unwrap_or("")), false);
+            self.msg(&format!("{} {} {}", self.lang.msg_launching, path.file_name().and_then(|n| n.to_str()).unwrap_or(""), self.lang.msg_in_terminal), false);
         }
-        else if HTML_EXT.contains(&ext)    { let _ = Command::new(&cfg.opener_browser).arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn(); }
+        else if HTML_EXT.contains(&ext)    { Self::spawn_silent(&cfg.opener_browser, &path); }
         else if ARCHIVE_EXT.contains(&ext) { self.extract_archive(&path.clone()); }
         else {
             // Shell scripts and executables — run in a new terminal window
@@ -351,263 +416,136 @@ impl App {
         }
     }
     pub fn extract_archive(&mut self, path: &Path) {
-        let dst      = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let src_s    = path.to_string_lossy().into_owned();
-        let dst_s    = dst.to_string_lossy().into_owned();
-        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        let ext      = path.extension()
-            .and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
-        let name_lower = path.file_name()
-            .and_then(|n| n.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
-
-        // Get total uncompressed size for progress (best-effort)
-        let total_bytes: u64 = Self::archive_total_size(&src_s, &ext, &name_lower);
-
         let (tx, rx) = mpsc::channel::<ExtractionProgress>();
+        let (initial, _) = crate::extract::start_extraction(path, tx);
         self.extract_rx       = Some(rx);
-        self.extract_progress = Some(ExtractionProgress {
-            filename: filename.clone(), current: 0, total: total_bytes,
-            done: false, error: None, start_time: Instant::now(), pid: None,
-        });
-        self.mode = InputMode::Extracting;
-
-        let fname = filename.clone();
-        std::thread::spawn(move || {
-            // Choose command + args based on format; pipe stdout for progress parsing
-            let result = Self::run_extraction_with_progress(&src_s, &dst_s, &ext, &name_lower, total_bytes, &tx, &fname);
-            let _ = tx.send(ExtractionProgress {
-                filename: fname, current: total_bytes.max(1), total: total_bytes.max(1),
-                done: true, error: result.err().map(|e| e.to_string()),
-                start_time: Instant::now(), pid: None,
-            });
-        });
+        self.extract_progress = Some(initial);
+        self.mode             = InputMode::Extracting;
     }
 
-    fn archive_total_size(src_s: &str, ext: &str, name_lower: &str) -> u64 {
-        if ext == "rar" {
-            // Use `unrar lt` (technical listing) which emits "Size: <bytes>" per file
-            // Sum those — avoids any ambiguity with the summary line format.
-            if let Ok(out) = Command::new("unrar").args(["lt", src_s]).output() {
-                let text = String::from_utf8_lossy(&out.stdout).into_owned();
-                let total: u64 = text.lines()
-                    .filter_map(|l| {
-                        let t = l.trim();
-                        // Lines look like: "   Size: 1234567"
-                        if t.to_lowercase().starts_with("size:") {
-                            t.split_whitespace().nth(1)?.parse::<u64>().ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .sum();
-                if total > 0 { return total; }
-            }
-            // Fallback: `unrar l` summary line "X files, Y bytes (Z GiB)"
-            if let Ok(out) = Command::new("unrar").args(["l", src_s]).output() {
-                let text = String::from_utf8_lossy(&out.stdout).into_owned();
-                for line in text.lines().rev() {
-                    let low = line.to_lowercase();
-                    if low.contains("bytes") || low.contains("byte") {
-                        // Grab the number immediately before "bytes"
-                        let words: Vec<&str> = line.split_whitespace().collect();
-                        for i in 1..words.len() {
-                            if words[i].to_lowercase().starts_with("byte") {
-                                if let Ok(n) = words[i-1].trim_end_matches(',').parse::<u64>() {
-                                    if n > 1024 { return n; }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return 0;
-        }
 
-        let out = if ext == "zip" {
-            Command::new("unzip").args(["-l", src_s]).output().ok()
-        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz")
-               || name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2")
-               || name_lower.ends_with(".tar.xz")  || name_lower.ends_with(".tar.zst")
-               || ext == "tar" {
-            Command::new("tar").args(["--list", "--verbose", "-f", src_s]).output().ok()
-        } else if ext == "7z" {
-            Command::new("7z").args(["l", src_s]).output().ok()
-        } else {
-            None
-        };
-        out.and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            // Parse last number on last non-empty line (most tools put total there)
-            text.lines().rev()
-                .find(|l| !l.trim().is_empty())
-                .and_then(|l| l.split_whitespace().filter_map(|w| w.parse::<u64>().ok()).last())
-        }).unwrap_or(0)
+    /// Call after changing tab_idx so the async loaders re-request for the new tab.
+    pub fn reset_dir_load_state(&mut self) {
+        self.parent_load_path     = None;
+        self.parent_load_rx       = None;
+        self.parent_load_debounce = None;
+        self.preview_load_path    = None;
+        self.preview_load_rx      = None;
+        self.preview_load_debounce = None;
     }
 
-    fn run_extraction_with_progress(
-        src_s: &str, dst_s: &str, ext: &str, name_lower: &str,
-        total: u64, tx: &mpsc::Sender<ExtractionProgress>, fname: &str,
-    ) -> std::io::Result<()> {
-        use std::io::{BufRead, BufReader};
-
-        // Build command with stdout piped so we can read progress lines
-        let mut cmd = if ext == "rar" {
-            let mut c = Command::new("unrar");
-            c.args(["x", "-o+", src_s, &format!("{}/", dst_s)]);
-            c
-        } else if ext == "zip" {
-            let mut c = Command::new("unzip");
-            c.args(["-o", src_s, "-d", dst_s]);
-            c
-        } else if name_lower.ends_with(".tar.gz") || name_lower.ends_with(".tgz") {
-            let mut c = Command::new("tar");
-            c.args(["-xzvf", src_s, "-C", dst_s]);
-            c
-        } else if name_lower.ends_with(".tar.bz2") || name_lower.ends_with(".tbz2") {
-            let mut c = Command::new("tar");
-            c.args(["-xjvf", src_s, "-C", dst_s]);
-            c
-        } else if name_lower.ends_with(".tar.xz") {
-            let mut c = Command::new("tar");
-            c.args(["-xJvf", src_s, "-C", dst_s]);
-            c
-        } else if name_lower.ends_with(".tar.zst") {
-            let mut c = Command::new("tar");
-            c.args(["--zstd", "-xvf", src_s, "-C", dst_s]);
-            c
-        } else if ext == "tar" {
-            let mut c = Command::new("tar");
-            c.args(["-xvf", src_s, "-C", dst_s]);
-            c
-        } else if ext == "7z" {
-            let mut c = Command::new("7z");
-            c.args(["x", src_s, &format!("-o{}", dst_s), "-y"]);
-            c
-        } else if ext == "gz" {
-            let mut c = Command::new("gunzip");
-            c.args(["-kf", src_s]);
-            c
-        } else if ext == "bz2" {
-            let mut c = Command::new("bunzip2");
-            c.args(["-kf", src_s]);
-            c
-        } else if ext == "xz" {
-            let mut c = Command::new("xz");
-            c.args(["-dkf", src_s]);
-            c
-        } else if ext == "zst" {
-            let out_name = std::path::Path::new(src_s)
-                .file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-            let mut c = Command::new("zstd");
-            c.args(["-dkf", src_s, "-o", &format!("{}/{}", dst_s, out_name)]);
-            c
-        } else {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
-                format!("No extractor for .{}", ext)));
-        };
-
-        cmd.stdout(std::process::Stdio::piped())
-           .stderr(std::process::Stdio::piped())
-           .stdin(std::process::Stdio::null());
-
-        let mut child = cmd.spawn()?;
-        let child_pid = child.id();
-        let stdout = child.stdout.take().expect("stdout piped");
-        let reader = BufReader::new(stdout);
-
-        // Send PID immediately so App can kill the process if ESC is pressed
-        let _ = tx.send(ExtractionProgress {
-            filename: fname.to_string(), current: 0, total,
-            done: false, error: None, start_time: Instant::now(),
-            pid: Some(child_pid),
-        });
-
-        let mut extracted: u64 = 0;
-        let mut files_extracted: u64 = 0;
-        let mut total_files: u64 = 0;
-
-        // For RAR: unrar x output lines look like:
-        //   "Extracting  path/to/file.ext                    OK"
-        // There are no per-file byte sizes in the output — only filenames.
-        // We track file count and scale to bytes proportionally using total_bytes.
-        // For other formats: parse sizes from lines as before.
-        let is_rar = ext == "rar";
-
-        // Pre-count total files for RAR so we can show proportional progress
-        if is_rar && total > 0 {
-            if let Ok(out) = Command::new("unrar").args(["l", src_s]).output() {
-                let text = String::from_utf8_lossy(&out.stdout).into_owned();
-                total_files = text.lines()
-                    .filter(|l| {
-                        // Count listing lines that represent files (have a size column)
-                        let trimmed = l.trim();
-                        !trimmed.is_empty()
-                            && !trimmed.starts_with("Archive:")
-                            && !trimmed.starts_with("Details:")
-                            && !trimmed.starts_with("Name")
-                            && !trimmed.starts_with("----")
-                            && !trimmed.contains("files,")
-                            && trimmed.split_whitespace().count() >= 2
-                    })
-                    .count() as u64;
-            }
-        }
-
-        for line in reader.lines() {
-            let line = match line { Ok(l) => l, Err(_) => break };
-
-            if is_rar {
-                // Count "Extracting" lines as file completions
-                if line.trim_start().starts_with("Extracting") {
-                    files_extracted += 1;
-                    if total > 0 && total_files > 0 {
-                        extracted = (files_extracted * total / total_files).min(total);
-                    } else {
-                        extracted = files_extracted;
-                    }
-                }
-            } else {
-                // For tar/zip/7z: parse size from the output line
-                let size_in_line: u64 = line.split_whitespace()
-                    .filter_map(|w| w.parse::<u64>().ok())
-                    .next()
-                    .unwrap_or(0);
-
-                if total == 0 {
-                    extracted += 1;
-                } else {
-                    extracted = (extracted + size_in_line.max(1)).min(total);
-                }
-            }
-
-            let _ = tx.send(ExtractionProgress {
-                filename:   fname.to_string(),
-                current:    extracted,
-                total,
-                done:       false,
-                error:      None,
-                start_time: Instant::now(),
-                pid:        None,  // already sent on first message
-            });
-        }
-
-        child.wait()?;
-        Ok(())
-    }
     pub fn new_tab(&mut self) {
         let cwd = self.tab().cwd.clone(); let sh = self.cfg.show_hidden;
         self.tabs.push(Tab::new(cwd, sh));
         self.tab_idx = self.tabs.len() - 1;
-        self.msg(&format!("Tab {} opened", self.tab_idx+1), false);
+        self.reset_dir_load_state();
+        self.msg(&format!("{} {} {}", self.lang.msg_tab_word, self.tab_idx+1, self.lang.msg_opened_word), false);
     }
     pub fn close_tab(&mut self) {
-        if self.tabs.len() == 1 { self.msg("Can't close last tab", true); return; }
+        if self.tabs.len() == 1 { self.msg(self.lang.msg_cant_close_tab, true); return; }
         self.tabs.remove(self.tab_idx);
         self.tab_idx = self.tab_idx.min(self.tabs.len()-1);
+        self.reset_dir_load_state();
     }
-    /// Spawn a background thread that runs ffmpeg to extract a thumbnail frame.
-    /// Sends the output path on the channel when done; App::tick() picks it up.
+    // ── Fuse-mount detection ─────────────────────────────────────────────────
+
+    /// Rebuild the fuse-mount list from /proc/mounts at most once per second.
+    pub fn refresh_fuse_mounts(&mut self) {
+        let stale = self.fuse_mounts_time
+            .map(|t| t.elapsed().as_secs() >= 1)
+            .unwrap_or(true);
+        if !stale { return; }
+        self.fuse_mounts_time = Some(Instant::now());
+        self.fuse_mounts.clear();
+        if let Ok(text) = std::fs::read_to_string("/proc/mounts") {
+            for line in text.lines() {
+                // Fields: device  mountpoint  fstype  options  ...
+                let mut parts = line.split_whitespace();
+                let _dev   = parts.next();
+                let mnt    = parts.next().unwrap_or("");
+                let fstype = parts.next().unwrap_or("");
+                // fuse.jmtpfs, fuse.sshfs, fuse.gvfsd-fuse, etc.
+                if fstype.starts_with("fuse") {
+                    self.fuse_mounts.push(PathBuf::from(mnt));
+                }
+            }
+            // Sort so longest prefix wins on is_fuse_path
+            self.fuse_mounts.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+        }
+    }
+
+    /// Returns true if `path` lives on a known fuse filesystem (jmtpfs, sshfs…).
+    pub fn is_fuse_path(&mut self, path: &Path) -> bool {
+        self.refresh_fuse_mounts();
+        self.fuse_mounts.iter().any(|mnt| path.starts_with(mnt))
+    }
+
+    // ── Async parent-pane directory load ─────────────────────────────────────
+
+    /// Called from draw_parent_pane — requests a background load if the parent
+    /// directory has changed. Never blocks the render thread.
+    pub fn request_parent_load(&mut self, parent: PathBuf) {
+        if self.parent_load_path.as_deref() == Some(&parent) { return; }
+        // New target — reset and start debounce
+        self.parent_load_path     = Some(parent);
+        self.parent_load_rx       = None;
+        self.parent_load_debounce = Some(Instant::now());
+    }
+
+    /// Called from tick() — spawns the thread once the debounce expires.
+    pub fn maybe_spawn_parent_load(&mut self) {
+        if self.parent_load_rx.is_some() { return; }
+        let path = match self.parent_load_path.clone() { Some(p) => p, None => return };
+        match self.parent_load_debounce {
+            None => return,
+            Some(t) if t.elapsed() < Duration::from_millis(80) => return,
+            _ => { self.parent_load_debounce = None; }
+        }
+        let sh = self.tab().show_hidden;
+        let (tx, rx) = mpsc::channel();
+        self.parent_load_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(list_dir(&path, sh));
+        });
+    }
+
+    // ── Async preview-pane directory load ────────────────────────────────────
+
+    /// Called from draw_preview_pane — requests a background load if the hovered
+    /// directory has changed. Never blocks the render thread.
+    pub fn request_preview_load(&mut self, dir: PathBuf) {
+        if self.preview_load_path.as_deref() == Some(&dir) { return; }
+        self.preview_load_path     = Some(dir);
+        self.preview_load_rx       = None;
+        self.preview_load_debounce = Some(Instant::now());
+    }
+
+    /// Called from tick() — spawns the thread once the debounce expires.
+    pub fn maybe_spawn_preview_load(&mut self) {
+        if self.preview_load_rx.is_some() { return; }
+        let path = match self.preview_load_path.clone() { Some(p) => p, None => return };
+        match self.preview_load_debounce {
+            None => return,
+            Some(t) if t.elapsed() < Duration::from_millis(80) => return,
+            _ => { self.preview_load_debounce = None; }
+        }
+        let sh = self.tab().show_hidden;
+        let (tx, rx) = mpsc::channel();
+        self.preview_load_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(list_dir(&path, sh));
+        });
+    }
+
+    /// Request an async `du` calculation for `dir`. Skips fuse filesystems.
     pub fn spawn_folder_size(&mut self, dir: PathBuf) {
+        // Skip fuse filesystems (jmtpfs, sshfs, …) — du blocks on these
+        if self.is_fuse_path(&dir) {
+            self.folder_size_val  = None;
+            self.folder_size_path = None;
+            return;
+        }
+
         // Already spawned or computed for this exact directory — nothing to do
         if self.folder_size_path.as_deref() == Some(&dir) { return; }
 
@@ -621,7 +559,6 @@ impl App {
 
     /// Called from tick() — spawns `du` once the debounce timer expires.
     pub fn maybe_spawn_folder_size(&mut self) {
-        // Called from tick() — spawns du once debounce has expired
         if self.folder_size_rx.is_some() || self.folder_size_val.is_some() { return; }
         let dir = match &self.folder_size_path {
             Some(p) => p.clone(),
@@ -776,6 +713,72 @@ impl App {
         // Always add custom command option at the bottom
         entries.push(("Custom command…".into(), "__custom__".into()));
         self.mode = InputMode::OpenWith(path, entries, 0);
+    }
+
+    pub fn open_drive_manager(&mut self) {
+        self.drive_devices = crate::drives::list_devices();
+        self.drive_cursor  = 0;
+        self.mode          = InputMode::DriveManager;
+    }
+
+    pub fn drive_mount(&mut self) {
+        let dev = match self.drive_devices.get(self.drive_cursor).cloned() {
+            Some(d) => d, None => return,
+        };
+        if dev.mount.is_some() {
+            self.msg(self.lang.msg_already_mounted, true);
+            return;
+        }
+        match crate::drives::mount_device(&dev) {
+            crate::drives::MountResult::Ok(path) => {
+                self.msg(&format!("{} {}", self.lang.msg_mounted_at, path.display()), false);
+                self.drive_devices = crate::drives::list_devices();
+            }
+            crate::drives::MountResult::Err(e) => {
+                self.msg(&format!("{}: {}", self.lang.msg_mount_failed, e), true);
+            }
+        }
+    }
+
+    pub fn drive_unmount(&mut self) {
+        let dev = match self.drive_devices.get(self.drive_cursor).cloned() {
+            Some(d) => d, None => return,
+        };
+        if dev.mount.is_none() {
+            self.msg(self.lang.msg_not_mounted, true);
+            return;
+        }
+        match crate::drives::unmount_device(&dev) {
+            Ok(()) => {
+                self.msg(&format!("{} {}", self.lang.msg_unmounted, dev.label), false);
+                self.drive_devices = crate::drives::list_devices();
+            }
+            Err(e) => {
+                self.msg(&format!("{}: {}", self.lang.msg_unmount_failed, e), true);
+            }
+        }
+    }
+
+    pub fn drive_navigate(&mut self) {
+        let dev = match self.drive_devices.get(self.drive_cursor).cloned() {
+            Some(d) => d, None => return,
+        };
+        if !dev.is_navigable() {
+            if dev.mount.is_none() {
+                self.msg(self.lang.msg_not_mounted_hint, true);
+            } else {
+                self.msg(self.lang.msg_cant_navigate, true);
+            }
+            return;
+        }
+        if let Some(mnt) = dev.mount {
+            self.mode = InputMode::Normal;
+            self.tabs[self.tab_idx].cwd = mnt;
+            self.tabs[self.tab_idx].refresh();
+            // Explicitly land at top of directory, not wherever the cursor was before
+            self.tabs[self.tab_idx].state.select(Some(0));
+            self.reset_dir_load_state();
+        }
     }
 
     pub fn open_fuzzy(&mut self) {

@@ -44,6 +44,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         InputMode::RunArgs(..) => draw_runargs_overlay(f, app, sz),
         InputMode::OpenWith(..) => draw_openwith_overlay(f, app, sz),
         InputMode::OpenWithCustom(..) => draw_openwith_custom_overlay(f, app, sz),
+        InputMode::DriveManager => draw_drive_overlay(f, app, sz),
         _ => {}
     }
 }
@@ -120,10 +121,16 @@ fn draw_body(f: &mut Frame, app: &mut App, rect: Rect) {
     draw_preview_pane(f, app, cols[2]);
 }
 
-fn draw_parent_pane(f: &mut Frame, app: &App, rect: Rect) {
-    let tab    = app.tab();
-    let parent = tab.cwd.parent().unwrap_or(&tab.cwd);
-    let entries = list_dir(parent, tab.show_hidden);
+fn draw_parent_pane(f: &mut Frame, app: &mut App, rect: Rect) {
+    // Request async load — never blocks render thread.
+    // tick() drains the channel and writes into tab.parent_entries.
+    {
+        let parent_path = app.tab().cwd.parent()
+            .unwrap_or(&app.tab().cwd).to_path_buf();
+        app.request_parent_load(parent_path);
+    }
+    let tab     = app.tab();
+    let entries = app.tab().parent_entries.clone();
     let h = rect.height as usize;
 
     let items: Vec<ListItem> = entries.iter().take(h).map(|e| {
@@ -172,19 +179,31 @@ fn draw_files_pane(f: &mut Frame, app: &mut App, rect: Rect) {
             let (fg, bg) = if is_cur { (app.theme.bg_primary, app.theme.accent) }
                            else if is_sel { (app.theme.accent, app.theme.bg_panel) }
                            else { (fg, app.theme.bg_primary) };
-            let mtime_str = if app.cfg.show_file_mtime {
-                let (t, d) = format_mtime_split(e);
-                format!("  {} {}", t, d)
-            } else { String::new() };
-            let mtime_w = mtime_str.chars().count() as u16;
-            let max_name = (rect.width.saturating_sub(14 + mtime_w)) as usize;
-            let name_clipped: String = name.chars().take(max_name).collect();
-            ListItem::new(Line::from(vec![
+
+            // Fixed column layout so time/date always appear right after size:
+            //  [icon 3] [name · · · · col_name] [size 7] [time 5] [  ] [date 10]
+            let (time_str, date_str) = if app.cfg.show_file_mtime {
+                format_mtime_split(e)
+            } else { (String::new(), String::new()) };
+            // col_meta = space taken by size + time + date + separators
+            // icon=4 (nerd font wide char + spaces), size=7, " HH:MM  DD/MM/YYYY"=18
+            // +2 safety margin for wide unicode rendering differences
+            let col_meta: u16 = if app.cfg.show_file_mtime { 4 + 7 + 18 + 2 } else { 4 + 7 + 2 };
+            let col_name = (rect.width.saturating_sub(col_meta)) as usize;
+            let name_padded = {
+                let clipped: String = name.chars().take(col_name).collect();
+                format!("{:<col_name$}", clipped)
+            };
+            let meta_fg = if is_cur { app.theme.bg_primary } else { app.theme.fg_muted };
+            let mut spans = vec![
                 Span::styled(format!(" {} ", ic), st_bg(fg, bg)),
-                Span::styled(name_clipped, st_bg(fg, bg)),
-                Span::styled(format!(" {:>6}", size), st_bg(if is_cur { app.theme.bg_primary } else { app.theme.fg_muted }, bg)),
-                Span::styled(mtime_str, st_bg(app.theme.fg_muted, bg)),
-            ]))
+                Span::styled(name_padded, st_bg(fg, bg)),
+                Span::styled(format!(" {:>6}", size), st_bg(meta_fg, bg)),
+            ];
+            if app.cfg.show_file_mtime {
+                spans.push(Span::styled(format!(" {}  {}", time_str, date_str), st_bg(meta_fg, bg)));
+            }
+            ListItem::new(Line::from(spans))
         }).collect();
 
     let title = {
@@ -246,11 +265,28 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
 
     // Image preview — non-blocking, loaded in background thread
     if IMAGE_EXT.contains(&ext.as_str()) {
-        // RAW/HEIC/JXL/PSD/SVG/XCF can't be decoded by the image crate —
+        // SVG: show file info — neither image crate nor ffmpeg handle SVGs reliably
+        if ext == "svg" || ext == "svgz" {
+            let size_str = human_size(current.metadata().map(|m| m.len()).unwrap_or(0));
+            let lines = vec![
+                Line::from(Span::styled("  SVG Vector Image", bold(app.theme.fg_dim))),
+                Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.fg_dim))),
+                Line::from(Span::raw("")),
+                Line::from(Span::styled(
+                    format!("  Press Enter to open with {}", app.cfg.opener_image),
+                    st(app.theme.fg_muted),
+                )),
+            ];
+            let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+            f.render_widget(p, content_rect);
+            return;
+        }
+        // RAW/HEIC/JXL/PSD/XCF can't be decoded by the image crate —
         // fall back to ffmpeg thumbnail (same path as video)
+        // SVG is excluded — ffmpeg can't thumbnail SVGs; we show info text instead
         const FFMPEG_FALLBACK: &[&str] = &[
             "raw","arw","cr2","cr3","nef","nrw","orf","raf","rw2","dng","pef","srw","x3f",
-            "heic","heif","jxl","svg","xcf","psd","dds",
+            "heic","heif","jxl","xcf","psd","dds",
         ];
         if FFMPEG_FALLBACK.contains(&ext.as_str()) {
             app.spawn_video_thumb(current.clone());
@@ -281,7 +317,10 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
 
     // Directory listing
     if current.is_dir() {
-        let entries = list_dir(&current, app.cfg.show_hidden);
+        // Request async directory load — tick() populates preview_entries.
+        // Draw only reads the cache: no filesystem I/O on the render thread.
+        app.request_preview_load(current.clone());
+        let entries = app.tab().preview_entries.clone();
 
         // Kick off async folder size calculation (debounced, non-blocking)
         app.spawn_folder_size(current.clone());
@@ -321,15 +360,15 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
 
             let size_line = if let Some(folder_bytes) = app.folder_size_val {
                 Line::from(vec![
-                    Span::styled("  Folder size: ", st(app.theme.fg_muted)),
-                    Span::styled(human_size_u64(folder_bytes), bold(app.theme.accent)),
+                    Span::styled(format!("  {}: ", app.lang.preview_folder_size), st(app.theme.fg_muted)),
+                    Span::styled(si_size(folder_bytes), bold(app.theme.accent)),
                 ])
             } else {
-                Line::from(Span::styled("  Folder size: …", st(app.theme.fg_muted)))
+                Line::from(Span::styled(format!("  {}: {}", app.lang.preview_folder_size, app.lang.preview_computing), st(app.theme.fg_muted)))
             };
 
             let count_line = Line::from(Span::styled(
-                format!("  {} item{}", entry_count, if entry_count == 1 { "" } else { "s" }),
+                format!("  {} {}", entry_count, if entry_count == 1 { app.lang.preview_item } else { app.lang.preview_items }),
                 st(app.theme.fg_muted),
             ));
 
@@ -362,22 +401,6 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, rect: Rect) {
         return;
     }
 
-    // HTML — show info, open in browser on Enter
-    if HTML_EXT.contains(&ext.as_str()) {
-        let size_str = human_size(current.metadata().map(|m| m.len()).unwrap_or(0));
-        let lines = vec![
-            Line::from(Span::styled("  HTML file", bold(app.theme.fg_dim))),
-            Line::from(Span::styled(format!("  Size:   {}", size_str), st(app.theme.fg_dim))),
-            Line::from(Span::raw("")),
-            Line::from(Span::styled(
-                format!("  Press Enter to open in {}", app.cfg.opener_browser),
-                st(app.theme.fg_muted),
-            )),
-        ];
-        let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
-        f.render_widget(p, content_rect);
-        return;
-    }
 
     // Video preview — generate thumbnail via ffmpeg in a background thread
     if VIDEO_EXT.contains(&ext.as_str()) {
@@ -529,7 +552,7 @@ fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
         .borders(Borders::ALL)
         .border_style(bold(app.theme.accent))
         .title(Span::styled(
-            format!("  \u{f410} Extracting {}  [Esc cancel]  ", prog.filename),
+            format!("  \u{f410} {} {}  {}  ", app.lang.msg_extracting, prog.filename, app.lang.msg_esc_cancel),
             bold_bg(app.theme.fg_dim, app.theme.bg_primary),
         ))
         .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
@@ -575,11 +598,11 @@ fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
     let stats = if prog.total > 0 {
         format!("  {}%   {} / {}",
             pct,
-            human_size_u64(prog.current),
-            human_size_u64(prog.total),
+            si_size(prog.current),
+            si_size(prog.total),
         )
     } else {
-        format!("  {} extracted  (total size unknown)", human_size_u64(prog.current))
+        format!("  {} extracted  (total size unknown)", si_size(prog.current))
     };
     f.render_widget(
         Paragraph::new(Span::styled(stats, st(app.theme.fg_dim))),
@@ -609,7 +632,7 @@ fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
 }
 
 /// Format bytes using SI base-10 units (GB/MB/KB) to match file managers.
-pub fn human_size_u64(b: u64) -> String {
+pub fn si_size(b: u64) -> String {
     // Use SI base-10 units (GB = 10^9) to match file managers like Nemo/Nautilus
     if b >= 1_000_000_000 { format!("{:.1} GB", b as f64 / 1_000_000_000.0) }
     else if b >= 1_000_000 { format!("{:.1} MB", b as f64 / 1_000_000.0) }
@@ -619,9 +642,14 @@ pub fn human_size_u64(b: u64) -> String {
 
 /// Returns the total apparent size of a folder in bytes using `du -sb`,
 /// matching what file managers like Nemo/Nautilus report.
+///
+/// Returns the total apparent size of a folder in bytes using `du -sb`.
+/// Fuse-filesystem guard is handled upstream in `App::spawn_folder_size`
+/// via `is_fuse_path`, so by the time this function is called the path is
+/// known to be on a normal local filesystem.
 pub fn folder_size(path: &Path) -> Option<u64> {
     use std::process::Command;
-        let out = Command::new("du")
+    let out = Command::new("du")
         .args(["-sb", path.to_str()?])
         .output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -630,7 +658,139 @@ pub fn folder_size(path: &Path) -> Option<u64> {
         .and_then(|w| w.parse::<u64>().ok())
 }
 
-fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
+fn draw_drive_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    use crate::drives::DeviceKind;
+
+    let ow = (rect.width * 3 / 5).max(64).min(rect.width);
+    let oh = (rect.height * 2 / 3).max(14).min(rect.height);
+    let ox = (rect.width  - ow) / 2;
+    let oy = (rect.height - oh) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  {} {}  ", app.icons.chrome.help_icon, app.lang.drive_title),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    f.render_widget(block, popup);
+
+    let inner = Rect {
+        x: popup.x + 1, y: popup.y + 1,
+        width: popup.width.saturating_sub(2),
+        height: popup.height.saturating_sub(2),
+    };
+
+    let devices = &app.drive_devices;
+
+    if devices.is_empty() {
+        let msg = Paragraph::new(vec![
+            Line::from(Span::styled(format!("  {}", app.lang.drive_no_devices), st(app.theme.fg_muted))),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(format!("  • {}", app.lang.drive_tip_plug), st(app.theme.fg_dim))),
+            Line::from(Span::styled(format!("  • {}", app.lang.drive_tip_mtp), st(app.theme.fg_dim))),
+            Line::from(Span::styled(format!("  • {}", app.lang.drive_tip_jmtpfs), st(app.theme.fg_dim))),
+        ])
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    // Header row
+    let header_rect = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    let list_rect   = Rect {
+        x: inner.x, y: inner.y + 1,
+        width: inner.width, height: inner.height.saturating_sub(2),
+    };
+    let hint_rect   = Rect {
+        x: inner.x, y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width, height: 1,
+    };
+
+    // Column widths
+    let w = inner.width as usize;
+    let col_icon  = 2usize;
+    let col_size  = 6usize;
+    let col_fs    = 7usize;
+    let col_mnt   = (w / 3).max(10);
+    let col_label = w.saturating_sub(col_icon + col_size + col_fs + col_mnt + 4);
+
+    let hdr = Line::from(vec![
+        Span::styled(format!("  {:<col_label$}  {:<col_size$}  {:<col_fs$}  {}", app.lang.drive_col_name, app.lang.drive_col_size, app.lang.drive_col_fs, app.lang.drive_col_mount),
+            bold(app.theme.fg_dim)),
+    ]);
+    f.render_widget(Paragraph::new(hdr).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)), header_rect);
+
+    let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, dev)| {
+        let selected = i == app.drive_cursor;
+        let is_internal = matches!(dev.kind, DeviceKind::Internal);
+        let (fg, bg) = if selected {
+            (app.theme.bg_primary, app.theme.accent)
+        } else if is_internal {
+            (app.theme.fg_dim, app.theme.bg_primary)
+        } else {
+            (app.theme.fg_primary, app.theme.bg_primary)
+        };
+
+        let icon = match dev.kind {
+            DeviceKind::Internal  => "󰋊",   // internal HDD/SSD
+            DeviceKind::Removable => "󱊡",   // USB / external
+            DeviceKind::MtpPhone  => "󰄜",   // phone
+        };
+        let mounted_str = dev.mount.as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "—".to_string());
+        let mnt_display = if mounted_str.len() > col_mnt {
+            format!("…{}", &mounted_str[mounted_str.len().saturating_sub(col_mnt - 1)..])
+        } else {
+            format!("{:<col_mnt$}", mounted_str)
+        };
+
+        let label_display = if dev.label.len() > col_label {
+            format!("{}…", &dev.label[..col_label.saturating_sub(1)])
+        } else {
+            format!("{:<col_label$}", dev.label)
+        };
+
+        let mount_color = if dev.mount.is_some() { app.theme.accent } else { app.theme.fg_muted };
+
+        Line::from(vec![
+            Span::styled(format!(" {} ", icon), st_bg(fg, bg)),
+            Span::styled(format!("{} ", label_display), st_bg(fg, bg)),
+            Span::styled(format!("{:<col_size$} ", dev.size), st_bg(app.theme.fg_muted, bg)),
+            Span::styled(format!("{:<col_fs$} ", dev.fstype), st_bg(app.theme.fg_dim, bg)),
+            Span::styled(mnt_display, if selected { st_bg(fg, bg) } else { st_bg(mount_color, bg) }),
+        ])
+    }).map(ListItem::new).collect();
+
+    let list = List::new(items)
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    f.render_widget(list, list_rect);
+
+    // Hint bar at bottom
+    let l = app.lang;
+    let hint = Line::from(vec![
+        Span::styled("  m", bold(app.theme.accent)),
+        Span::styled(format!(" {}  ", l.drive_hint_mount), st(app.theme.fg_muted)),
+        Span::styled("u", bold(app.theme.accent)),
+        Span::styled(format!(" {}  ", l.drive_hint_unmount), st(app.theme.fg_muted)),
+        Span::styled("Enter", bold(app.theme.accent)),
+        Span::styled(format!(" {}  ", l.drive_hint_navigate), st(app.theme.fg_muted)),
+        Span::styled("r", bold(app.theme.accent)),
+        Span::styled(format!(" {}  ", l.drive_hint_refresh), st(app.theme.fg_muted)),
+        Span::styled("Esc", bold(app.theme.accent)),
+        Span::styled(format!(" {}", l.drive_hint_close), st(app.theme.fg_muted)),
+    ]);
+    f.render_widget(
+        Paragraph::new(hint).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)),
+        hint_rect,
+    );
+}
+
+fn draw_help_overlay(f: &mut Frame, app: &mut App, rect: Rect) {
     let ow = (rect.width * 3 / 4).max(60).min(rect.width);
     let oh = (rect.height * 4 / 5).max(20).min(rect.height);
     let ox = (rect.width  - ow) / 2;
@@ -642,7 +802,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
         .borders(Borders::ALL)
         .border_style(bold(app.theme.accent))
         .title(Span::styled(
-            format!("  {} Keybinds  [Esc / ? to close]  ", app.icons.chrome.help_icon),
+            format!("  {} Keybinds  [Esc close | ↑↓ / jk scroll | Home top]  ", app.icons.chrome.help_icon),
             bold_bg(app.theme.fg_dim, app.theme.bg_primary),
         ))
         .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
@@ -660,46 +820,51 @@ fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
     let key_col_w = col_w.min(22);
 
     // Build sections dynamically from live cfg values
+    let l = app.lang;
     let nav_section = vec![
-        ("\u{2191} / \u{2193}".to_string(),  "Move cursor up / down".to_string()),
-        ("\u{2192} / Enter".to_string(),     "Open file or enter directory".to_string()),
-        ("\u{2190} / Backspace".to_string(), "Go up to parent directory".to_string()),
-        ("Page Up / Down".to_string(),       "Jump 10 entries".to_string()),
-        ("Home / End".to_string(),           "First / last entry".to_string()),
+        ("\u{2191} / \u{2193}".to_string(),  l.help_move_cursor.to_string()),
+        ("\u{2192} / Enter".to_string(),     l.help_open_enter.to_string()),
+        ("\u{2190} / Backspace".to_string(), l.help_go_up.to_string()),
+        ("Page Up / Down".to_string(),       l.help_jump10.to_string()),
+        ("Home / End".to_string(),           l.help_first_last.to_string()),
     ];
     let file_section = vec![
-        (cfg.key_select.clone(),             "Select / deselect file".to_string()),
-        ("Ctrl+a  /  A".to_string(),         "Select all".to_string()),
-        ("Ctrl+r".to_string(),               "Deselect all".to_string()),
-        (cfg.key_copy.clone(),               "Copy selected".to_string()),
-        (cfg.key_cut.clone(),                "Cut selected".to_string()),
-        (cfg.key_paste.clone(),              "Paste".to_string()),
-        (cfg.key_delete.clone(),             "Delete selected (with confirm)".to_string()),
-        (cfg.key_rename.clone(),             "Rename".to_string()),
-        (cfg.key_new_file.clone(),           "New file".to_string()),
-        (cfg.key_new_dir.clone(),            "New directory".to_string()),
+        (cfg.key_select.clone(),             l.help_select.to_string()),
+        ("Ctrl+a  /  A".to_string(),         l.help_select_all.to_string()),
+        ("Ctrl+r".to_string(),               l.help_deselect_all.to_string()),
+        (cfg.key_copy.clone(),               l.help_copy.to_string()),
+        (cfg.key_cut.clone(),                l.help_cut.to_string()),
+        (cfg.key_paste.clone(),              l.help_paste.to_string()),
+        (cfg.key_delete.clone(),             l.help_delete.to_string()),
+        (cfg.key_rename.clone(),             l.help_rename.to_string()),
+        (cfg.key_new_file.clone(),           l.help_new_file.to_string()),
+        (cfg.key_new_dir.clone(),            l.help_new_dir.to_string()),
     ];
     let search_section = vec![
-        (cfg.key_search.clone(),             "Fuzzy find (recursive search)".to_string()),
+        (cfg.key_search.clone(),             l.help_fuzzy.to_string()),
     ];
     let tab_section = vec![
-        (cfg.key_new_tab.clone(),            "Open new tab".to_string()),
-        (cfg.key_close_tab.clone(),          "Close current tab".to_string()),
-        (cfg.key_cycle_tab.clone(),           "Cycle to next tab".to_string()),
+        (cfg.key_new_tab.clone(),            l.help_new_tab.to_string()),
+        (cfg.key_close_tab.clone(),          l.help_close_tab.to_string()),
+        (cfg.key_cycle_tab.clone(),          l.help_cycle_tab.to_string()),
     ];
     let app_section = vec![
-        (cfg.key_toggle_hidden.clone(),      "Toggle hidden files".to_string()),
-        (":".to_string(),                    "Open settings".to_string()),
-        ("?".to_string(),                    "Show this help".to_string()),
-        (format!("{}  /  Esc", cfg.key_quit), "Quit".to_string()),
+        (cfg.key_toggle_hidden.clone(),      l.help_toggle_hidden.to_string()),
+        ("D".to_string(),                    l.help_drives.to_string()),
+        ("m  (in drive overlay)".to_string(),l.help_drive_mount.to_string()),
+        ("u  (in drive overlay)".to_string(),l.help_drive_unmount.to_string()),
+        ("r  (in drive overlay)".to_string(),l.help_drive_refresh.to_string()),
+        (":".to_string(),                    l.help_open_settings.to_string()),
+        ("?".to_string(),                    l.help_show_help.to_string()),
+        (format!("{}  /  Esc", cfg.key_quit), l.help_quit.to_string()),
     ];
 
     let sections: &[(&str, &Vec<(String, String)>)] = &[
-        (&format!("{}  Navigation", app.icons.chrome.nav_icon),     &nav_section),
-        (&format!("{}  File Operations", app.icons.chrome.ops_icon),&file_section),
-        (&format!("{}  Search", app.icons.chrome.search_sec_icon), &search_section),
-        (&format!("{}  Tabs", app.icons.chrome.tab_sec_icon),           &tab_section),
-        (&format!("{}  App", app.icons.chrome.settings_icon), &app_section),
+        (&format!("{}  {}", app.icons.chrome.nav_icon,        l.help_navigation), &nav_section),
+        (&format!("{}  {}", app.icons.chrome.ops_icon,        l.help_file_ops),   &file_section),
+        (&format!("{}  {}", app.icons.chrome.search_sec_icon, l.help_search),     &search_section),
+        (&format!("{}  {}", app.icons.chrome.tab_sec_icon,    l.help_tabs),       &tab_section),
+        (&format!("{}  {}", app.icons.chrome.settings_icon,   l.help_app),        &app_section),
     ];
 
     let mut lines: Vec<Line> = vec![];
@@ -714,8 +879,34 @@ fn draw_help_overlay(f: &mut Frame, app: &App, rect: Rect) {
         lines.push(Line::from(Span::raw("")));
     }
 
-    let p = Paragraph::new(lines).style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let total_lines = lines.len() as u16;
+    let visible_h   = inner.height;
+    // Clamp scroll so we can't scroll past the last line
+    let max_scroll = total_lines.saturating_sub(visible_h) as usize;
+    if app.help_scroll > max_scroll { app.help_scroll = max_scroll; }
+    let scroll = app.help_scroll as u16;
+
+    let p = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
     f.render_widget(p, inner);
+
+    // Scroll indicator in bottom-right if there's more content
+    if total_lines > visible_h {
+        let pct = if max_scroll == 0 { 100 } else { (app.help_scroll * 100 / max_scroll).min(100) };
+        let indicator = format!(" ↑↓ scroll  {}% ", pct);
+        let ind_w = indicator.chars().count() as u16;
+        let ind_rect = Rect {
+            x: popup.x + popup.width.saturating_sub(ind_w + 1),
+            y: popup.y + popup.height.saturating_sub(1),
+            width: ind_w,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(indicator, bold_bg(app.theme.fg_dim, app.theme.bg_primary))),
+            ind_rect,
+        );
+    }
 }
 
 fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
@@ -736,11 +927,13 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         .split(rect);
 
     // Section tabs
+    let l = app.lang;
     let sections = [
-        (SettingsSection::Behaviour,  "Behaviour"),
-        (SettingsSection::Appearance, "Appearance"),
-        (SettingsSection::Openers,    "Openers"),
-        (SettingsSection::Keybinds,   "Keybinds"),
+        (SettingsSection::Behaviour,  l.sec_behaviour),
+        (SettingsSection::Appearance, l.sec_appearance),
+        (SettingsSection::Openers,    l.sec_openers),
+        (SettingsSection::Keybinds,   l.sec_keybinds),
+        (SettingsSection::About,      l.sec_about),
     ];
     let titles: Vec<Line> = sections.iter().map(|(sec, label)| {
         let s = format!("  {}  ", label);
@@ -751,14 +944,104 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
         .select(match app.settings.section {
             SettingsSection::Behaviour  => 0, SettingsSection::Appearance => 1,
             SettingsSection::Openers    => 2, SettingsSection::Keybinds   => 3,
+            SettingsSection::About      => 4,
         })
         .style(st_bg(app.theme.fg_dim, app.theme.bg_panel))
         .divider(Span::raw(""));
     f.render_widget(tabs, inner[0]);
 
+    // About section — custom read-only display
+    if app.settings.section == SettingsSection::About {
+        let accent = app.theme.accent;
+        let fg     = app.theme.fg_primary;
+        let muted  = app.theme.fg_muted;
+        let bg     = app.theme.bg_primary;
+        let l = app.lang;
+        let lines = vec![
+            Line::from(vec![]),
+            Line::from(vec![
+                Span::styled("  VoidDream", bold(accent)),
+                Span::styled(format!("  —  {}", l.about_tagline), st(fg)),
+            ]),
+            Line::from(vec![]),
+            Line::from(vec![
+                Span::styled(format!("  {:20}", l.about_ver),     st(muted)),
+                Span::styled("0.1.6", bold(fg)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("  {:20}", l.about_author),  st(muted)),
+                Span::styled("FemBoyGamerTechGuy", bold(fg)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("  {:20}", l.about_license), st(muted)),
+                Span::styled("GPL-3.0-or-later", bold(fg)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("  {:20}", l.about_repo),    st(muted)),
+                Span::styled("github.com/FemBoyGamerTechGuy/VoidDream", bold(accent)),
+            ]),
+            Line::from(vec![]),
+            Line::from(vec![
+                Span::styled(format!("  {}", l.about_built_with), st(muted)),
+            ]),
+        ];
+        f.render_widget(
+            Paragraph::new(lines).style(st_bg(fg, bg)),
+            inner[1],
+        );
+        return;
+    }
+
     // Items
     let items = SettingsState::section_items(&app.settings.section);
+    let l: &'static crate::lang::Lang = app.lang;
+    let translate_label = |key: &str, label: &'static str| -> &'static str {
+        match key {
+            "language"          => "Language",
+            "show_hidden"       => l.set_show_hidden,
+            "date_format"       => l.set_date_format,
+            "show_clock"        => l.set_show_clock,
+            "show_file_mtime"   => l.set_show_mtime,
+            "key_select"        => l.kb_select,
+            "key_select_all"    => l.kb_select_all,
+            "key_copy"          => l.kb_copy,
+            "key_cut"           => l.kb_cut,
+            "key_paste"         => l.kb_paste,
+            "key_delete"        => l.kb_delete,
+            "key_rename"        => l.kb_rename,
+            "key_new_file"      => l.kb_new_file,
+            "key_new_dir"       => l.kb_new_dir,
+            "key_search"        => l.kb_search,
+            "key_toggle_hidden" => l.kb_toggle_hidden,
+            "key_new_tab"       => l.kb_new_tab,
+            "key_close_tab"     => l.kb_close_tab,
+            "key_cycle_tab"     => l.kb_cycle_tab,
+            "key_quit"          => l.kb_quit,
+            "fixed_drives"      => l.kb_drives,
+            "fixed_drive_m"     => l.kb_drive_mount,
+            "fixed_drive_u"     => l.kb_drive_unmount,
+            "fixed_drive_r"     => l.kb_drive_refresh,
+            "fixed_nav"         => l.kb_navigate,
+            "fixed_open"        => l.kb_open,
+            "fixed_up"          => l.kb_go_up,
+            "fixed_pgupdown"    => l.kb_jump,
+            "fixed_homeend"     => l.kb_first_last,
+            "fixed_deselect"    => l.kb_deselect_all,
+            "fixed_sel_all2"    => l.kb_select_all2,
+            "fixed_open_with"   => l.kb_open_with,
+            "fixed_settings"    => l.kb_settings,
+            "fixed_help"        => l.kb_help,
+            "fixed_quit2"       => l.kb_quit2,
+            "fixed_about_app"   => l.about_app,
+            "fixed_about_ver"   => l.about_ver,
+            "fixed_about_author"=> l.about_author,
+            "fixed_about_license"=>l.about_license,
+            "fixed_about_repo"  => l.about_repo,
+            _                   => label,
+        }
+    };
     let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (key, label))| {
+        let label = translate_label(key, label);
         let val = SettingsState::get_value(key, &app.cfg);
         let is_cur = i == app.settings.cursor;
         let is_fixed = key.starts_with("fixed_");
@@ -785,7 +1068,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
 
     // Unsaved indicator
     if app.settings.dirty && !app.settings.dropdown {
-        let hint = Paragraph::new("  Unsaved changes — press S to save")
+        let hint = Paragraph::new(format!("  {}", app.lang.msg_unsaved_changes))
             .style(st_bg(app.theme.bg_primary, app.theme.accent2));
         f.render_widget(hint, inner[2]);
     }

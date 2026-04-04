@@ -590,8 +590,9 @@ pub struct Config {
     pub key_cycle_tab:     String,
     pub key_select:        String,
     pub key_select_all:    String,
-    pub show_clock:        bool,   // live HH:MM:SS clock in tab bar
-    pub show_file_mtime:   bool,   // date/time column in file panes
+    pub show_clock:        bool,
+    pub show_file_mtime:   bool,
+    pub language:          String,
 }
 
 impl Default for Config {
@@ -615,6 +616,7 @@ impl Default for Config {
             key_select: "Space".into(), key_select_all: "Ctrl+a".into(),
             show_clock: true,
             show_file_mtime: true,
+            language: "English (UK)".into(),
         }
     }
 }
@@ -652,11 +654,15 @@ impl Config {
     pub fn load() -> Self {
         let p = Self::config_path();
         if p.exists() {
-            if let Ok(d) = fs::read_to_string(&p) {
-                if let Ok(c) = serde_json::from_str(&d) { return c; }
+            match fs::read_to_string(&p).map(|d| serde_json::from_str::<Self>(&d)) {
+                Ok(Ok(cfg)) => return cfg,
+                Ok(Err(e))  => eprintln!("VoidDream: config parse error: {e}"),
+                Err(e)      => eprintln!("VoidDream: config read error: {e}"),
             }
         }
-        let c = Self::default(); let _ = c.save(); c
+        let c = Self::default();
+        let _ = c.save();
+        c
     }
     pub fn save(&self) -> Result<()> {
         let p = Self::config_path();
@@ -667,7 +673,7 @@ impl Config {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-pub enum SettingsSection { Behaviour, Appearance, Openers, Keybinds }
+pub enum SettingsSection { Behaviour, Appearance, Openers, Keybinds, About }
 
 pub struct SettingsState {
     pub section:    SettingsSection,
@@ -685,6 +691,7 @@ impl SettingsState {
     pub fn section_items(s: &SettingsSection) -> Vec<(&'static str, &'static str)> {
         match s {
             SettingsSection::Behaviour  => vec![
+                ("language",         "Language"),
                 ("show_hidden","Show hidden files"), ("date_format","Date format"),
                 ("show_clock","Show clock in tab bar"),
                 ("show_file_mtime","Show file date/time in file list"),
@@ -726,6 +733,10 @@ impl SettingsState {
                 ("key_toggle_hidden","Toggle hidden files"),
                 ("key_new_tab",      "New tab"),
                 ("key_close_tab",    "Close tab"),
+                ("fixed_drives",     "Drive / USB / phone manager  [D]"),
+                ("fixed_drive_m",    "  Mount selected device  [m]"),
+                ("fixed_drive_u",    "  Unmount selected device  [u]"),
+                ("fixed_drive_r",    "  Refresh device list  [r]"),
                 ("key_cycle_tab",    "Cycle tabs"),
                 ("key_quit",         "Quit"),
                 // Fixed (not configurable)
@@ -741,10 +752,22 @@ impl SettingsState {
                 ("fixed_help",       "Show help"),
                 ("fixed_quit2",      "Quit (alt)"),
             ],
+            SettingsSection::About => vec![
+                ("fixed_about_app",     "Application"),
+                ("fixed_about_ver",     "Version"),
+                ("fixed_about_author",  "Author"),
+                ("fixed_about_license", "License"),
+                ("fixed_about_repo",    "Repository"),
+            ],
         }
     }
     pub fn dropdown_options(key: &str) -> Option<Vec<String>> {
         match key {
+            "language"    => Some(vec![
+                "English (UK)".into(), "Română".into(),  "Français".into(), "Deutsch".into(),
+                "Español".into(),      "Italiano".into(), "Português".into(),"Русский".into(),
+                "日本語".into(),         "中文".into(),     "한국어".into(),    "العربية".into(),
+            ]),
             "theme"       => Some(Theme::installed_names()),
             "icon_set"    => Some(vec!["nerdfont","emoji","minimal","none"].iter().map(|s| s.to_string()).collect()),
             "show_hidden"      => Some(vec!["true".to_string(), "false".to_string()]),
@@ -761,6 +784,7 @@ impl SettingsState {
             "date_format"       => cfg.date_format.clone(),
             "col_parent"        => cfg.col_parent.to_string(),
             "col_files"         => cfg.col_files.to_string(),
+            "language"          => cfg.language.clone(),
             "theme"             => cfg.theme.clone(),
             "icon_set"          => cfg.icon_set.clone(),
             "opener_browser"    => cfg.opener_browser.clone(),
@@ -781,23 +805,27 @@ impl SettingsState {
             "key_search"        => cfg.key_search.clone(),
             "key_toggle_hidden" => cfg.key_toggle_hidden.clone(),
             "key_quit"          => cfg.key_quit.clone(),
+            "fixed_drives"      => "D".into(),
+            "fixed_drive_m"     => "m".into(),
+            "fixed_drive_u"     => "u".into(),
+            "fixed_drive_r"     => "r".into(),
             "key_new_tab"       => cfg.key_new_tab.clone(),
             "key_close_tab"     => cfg.key_close_tab.clone(),
             "key_cycle_tab"     => cfg.key_cycle_tab.clone(),
             "key_select"        => cfg.key_select.clone(),
             "key_select_all"    => cfg.key_select_all.clone(),
-            "fixed_arc_rar"   => "unrar x -o+  (built-in)".into(),
-            "fixed_arc_zip"   => "unzip -o  (built-in)".into(),
-            "fixed_arc_tgz"   => "tar -xzf  (built-in)".into(),
-            "fixed_arc_tbz2"  => "tar -xjf  (built-in)".into(),
-            "fixed_arc_txz"   => "tar -xJf  (built-in)".into(),
-            "fixed_arc_tzst"  => "tar --zstd -xf  (built-in)".into(),
-            "fixed_arc_tar"   => "tar -xf  (built-in)".into(),
-            "fixed_arc_gz"    => "gunzip -kf  (built-in)".into(),
-            "fixed_arc_bz2"   => "bunzip2 -kf  (built-in)".into(),
-            "fixed_arc_xz"    => "xz -dkf  (built-in)".into(),
-            "fixed_arc_zst"   => "zstd -dkf  (built-in)".into(),
-            "fixed_arc_7z"    => "7z x -y  (built-in)".into(),
+            "fixed_arc_rar"   => "unrar (system)".into(),
+            "fixed_arc_zip"   => "native Rust".into(),
+            "fixed_arc_tgz"   => "native Rust".into(),
+            "fixed_arc_tbz2"  => "native Rust".into(),
+            "fixed_arc_txz"   => "native Rust".into(),
+            "fixed_arc_tzst"  => "native Rust".into(),
+            "fixed_arc_tar"   => "native Rust".into(),
+            "fixed_arc_gz"    => "native Rust".into(),
+            "fixed_arc_bz2"   => "native Rust".into(),
+            "fixed_arc_xz"    => "native Rust".into(),
+            "fixed_arc_zst"   => "native Rust".into(),
+            "fixed_arc_7z"    => "native Rust".into(),
             "fixed_nav"        => "\u{2191} / \u{2193}  (fixed)".into(),
             "fixed_open"       => "\u{2192} / Enter  (fixed)".into(),
             "fixed_up"         => "\u{2190} / Backspace  (fixed)".into(),
@@ -809,6 +837,11 @@ impl SettingsState {
             "fixed_settings"   => ":  (fixed)".into(),
             "fixed_help"       => "?  (fixed)".into(),
             "fixed_quit2"      => "Esc  (fixed)".into(),
+            "fixed_about_app"     => "VoidDream".into(),
+            "fixed_about_ver"     => "0.1.6".into(),
+            "fixed_about_author"  => "FemBoyGamerTechGuy".into(),
+            "fixed_about_license" => "GPL-3.0-or-later".into(),
+            "fixed_about_repo"    => "github.com/FemBoyGamerTechGuy/VoidDream".into(),
             _ => String::new(),
         }
     }
@@ -820,6 +853,7 @@ impl SettingsState {
             "date_format"       => cfg.date_format = val.into(),
             "col_parent"        => { if let Ok(n) = val.parse::<u16>() { cfg.col_parent = n.clamp(10,40); } }
             "col_files"         => { if let Ok(n) = val.parse::<u16>() { cfg.col_files  = n.clamp(20,60); } }
+            "language"          => cfg.language = val.into(),
             "theme"             => cfg.theme    = val.into(),
             "icon_set"          => cfg.icon_set = val.into(),
             "opener_browser"    => cfg.opener_browser  = val.into(),
