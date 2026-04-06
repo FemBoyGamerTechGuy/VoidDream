@@ -1,23 +1,19 @@
 # Maintainer: FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>
 pkgname=voiddream
-pkgver=0.1.6.r26.g98b57e3
+pkgver=0.1.7
 pkgrel=1
 pkgdesc="A dreamy void-themed TUI file manager built with Rust and Ratatui"
 arch=('x86_64' 'aarch64')
 url="https://github.com/FemBoyGamerTechGuy/VoidDream"
-license=('GPL-3.0-or-later')
-depends=('gcc-libs')
+license=('LicenseRef-VoidDream-1.0')
+depends=('gcc-libs' 'zstd' 'chafa' 'glib2')
 optdepends=(
     'ffmpeg: video thumbnails'
-    'chafa: image preview fallback'
     'mpv: video and audio playback'
     'neovim: text editor integration'
     'unrar: .rar extraction'
-    'unzip: .zip extraction'
-    'p7zip: .7z extraction'
-    'zstd: .zst and .tar.zst extraction'
 )
-makedepends=('rust' 'cargo' 'git' 'chafa' 'pkgconf')
+makedepends=('rust' 'cargo' 'git' 'pkgconf')
 source=("$pkgname::git+https://github.com/FemBoyGamerTechGuy/VoidDream.git")
 sha256sums=('SKIP')
 
@@ -38,6 +34,10 @@ build() {
     cd "$pkgname"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
+    # Use pkg-config to link against the system zstd shared library
+    # instead of trying to build the bundled static copy, which fails
+    # in the makepkg sandbox with lld.
+    export ZSTD_SYS_USE_PKG_CONFIG=1
     cargo build --release
 }
 
