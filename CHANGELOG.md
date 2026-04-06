@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.7] - 2026-04-05
+
+### Changed
+- **Re-licensed** — VoidDream has moved from GPL-3.0-or-later to the **VoidDream Proprietary License v1.0**. See `LICENSE` for full terms. In summary: personal use is free and unrestricted (privately), forking requires permission, redistribution requires permission, commercial use requires permission, and the license cannot be removed or replaced.
+
+### Added
+- **Copy/move progress overlay** — pressing `p` to paste now shows a live progress overlay with a progress bar, bytes transferred, percentage, file counter (File N of N), current filename, and an ETA / elapsed time line. Works for both copy and cut/move operations.
+- **Async copy/move with cancel** — copy and move operations run in a background thread. Press `Esc` during a copy/move to cancel immediately; partial files written during the cancelled operation are cleaned up automatically.
+- **Delete progress overlay** — deleting files or directories now shows a live progress overlay with a progress bar (red), file counter, current filename being deleted, and ETA. Replaces the previous instant silent delete.
+- **Async delete with cancel** — delete operations run in a background thread and respect the cancel flag. Press `Esc` to stop mid-delete without affecting already-deleted files.
+- **Yank cleared after paste** — after pasting (copy or cut), the yank buffer is always cleared so files are no longer shown as queued for copy after the operation completes or is cancelled.
+
+### Fixed
+- **Copy file counter stuck at File 1 of N** — the file counter now uses shared `Arc<AtomicU64>` counters that update correctly across recursive directory copies, so the counter increments properly for every individual file regardless of nesting depth.
+- **Cancelled copy left partial directories that could not be deleted** — the background copy thread previously kept running after Esc was pressed, writing files into the destination while the user tried to delete it. The cancel flag now stops the thread immediately and removes any partially written file.
+- **`copy_dir` dead code warning** — suppressed with `#[allow(dead_code)]`; kept for potential future use.
+- **`msg_pasted` unused field warning** — `Lang` struct marked `#[allow(dead_code)]` to cover retired string fields cleanly.
+
+---
+
 ## [0.1.6] - 2026-04-04
 
 ### Added

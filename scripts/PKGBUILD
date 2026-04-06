@@ -1,11 +1,11 @@
 # Maintainer: FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>
 pkgname=voiddream
-pkgver=0.1.6.r26.g98b57e3
+pkgver=0.1.5.r24.g20b4cfd
 pkgrel=1
 pkgdesc="A dreamy void-themed TUI file manager built with Rust and Ratatui"
 arch=('x86_64' 'aarch64')
 url="https://github.com/FemBoyGamerTechGuy/VoidDream"
-license=('GPL-3.0-or-later')
+license=('LicenseRef-VoidDream-1.0')
 depends=('gcc-libs')
 optdepends=(
     'ffmpeg: video thumbnails'

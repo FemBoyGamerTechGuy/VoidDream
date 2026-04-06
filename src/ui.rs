@@ -41,6 +41,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         InputMode::Confirm => draw_confirm_overlay(f, app, sz),
         InputMode::Help => draw_help_overlay(f, app, sz),
         InputMode::Extracting => draw_extract_overlay(f, app, sz),
+        InputMode::Copying    => draw_copy_overlay(f, app, sz),
+        InputMode::Deleting   => draw_delete_overlay(f, app, sz),
         InputMode::RunArgs(..) => draw_runargs_overlay(f, app, sz),
         InputMode::OpenWith(..) => draw_openwith_overlay(f, app, sz),
         InputMode::OpenWithCustom(..) => draw_openwith_custom_overlay(f, app, sz),
@@ -631,7 +633,215 @@ fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
     );
 }
 
-/// Format bytes using SI base-10 units (GB/MB/KB) to match file managers.
+fn draw_copy_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 2 / 3).max(52).min(rect.width);
+    let oh = 11u16;
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let prog = match &app.copy_progress {
+        Some(p) => p.clone(),
+        None    => return,
+    };
+
+    let verb = if prog.is_cut { "Moving" } else { "Copying" };
+    let icon = if prog.is_cut { "\u{f0162}" } else { "\u{f0164}" }; // nf-md-content_cut / content_copy
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  {} {}  {} file(s)  \u{2014}  Esc to cancel  ", icon, verb, prog.files_total),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Layout: spacer / bar / byte-stats / file-stats / current-file / spacer
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // progress bar
+            Constraint::Length(1), // byte stats + pct
+            Constraint::Length(1), // file counter
+            Constraint::Length(1), // current filename
+            Constraint::Length(1), // ETA / elapsed
+            Constraint::Min(0),    // trailing spacer
+        ])
+        .split(inner);
+
+    // ── Progress bar ─────────────────────────────────────────────────────────
+    let bar_w = rows[1].width as usize;
+    let (pct, filled) = if prog.bytes_total > 0 {
+        let p = (prog.bytes_done * 100 / prog.bytes_total).min(100);
+        let f = (prog.bytes_done * bar_w as u64 / prog.bytes_total).min(bar_w as u64) as usize;
+        (p, f)
+    } else {
+        // Unknown total — animate bouncing block
+        let pos = prog.files_done as usize % (bar_w * 2).max(1);
+        let pos = if pos < bar_w { pos } else { bar_w * 2 - pos };
+        (0, pos.min(bar_w / 5 + 1))
+    };
+
+    let filled_str: String = app.icons.chrome.progress_fill.repeat(filled);
+    let empty_str:  String = std::iter::repeat('\u{2591}').take(bar_w.saturating_sub(filled)).collect();
+    let bar_line = Line::from(vec![
+        Span::styled(filled_str, bold(app.theme.accent)),
+        Span::styled(empty_str, st(app.theme.bg_popup)),
+    ]);
+    f.render_widget(Paragraph::new(bar_line), rows[1]);
+
+    // ── Byte stats ───────────────────────────────────────────────────────────
+    let byte_stats = if prog.bytes_total > 0 {
+        format!("  {}%   {} / {}", pct, si_size(prog.bytes_done), si_size(prog.bytes_total))
+    } else {
+        format!("  {} transferred  (calculating total…)", si_size(prog.bytes_done))
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(byte_stats, st(app.theme.fg_dim))),
+        rows[2],
+    );
+
+    // ── File counter ─────────────────────────────────────────────────────────
+    let current_file_num = if prog.done { prog.files_total } else { prog.files_done + 1 }.min(prog.files_total);
+    let file_stats = format!(
+        "  \u{f0164}  File {} of {}",
+        current_file_num,
+        prog.files_total,
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(file_stats, st(app.theme.fg_dim))),
+        rows[3],
+    );
+
+    // ── Current filename (truncated to fit) ──────────────────────────────────
+    let max_name = rows[4].width.saturating_sub(4) as usize;
+    let display_name = if prog.current_file.len() > max_name && max_name > 3 {
+        format!("  …{}", &prog.current_file[prog.current_file.len() - max_name + 1..])
+    } else {
+        format!("  {}", prog.current_file)
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(display_name, st(app.theme.fg_muted))),
+        rows[4],
+    );
+
+    // ── ETA / elapsed ────────────────────────────────────────────────────────
+    let elapsed_secs = prog.start_time.elapsed().as_secs();
+    let eta_str = if prog.done || pct >= 100 {
+        format!("  \u{f00c}  Done in {}s", elapsed_secs)
+    } else if prog.bytes_total > 0 && prog.bytes_done > 0 {
+        let rate = prog.bytes_done as f64 / elapsed_secs.max(1) as f64;
+        let remaining = prog.bytes_total.saturating_sub(prog.bytes_done) as f64 / rate;
+        let eta_s = remaining as u64;
+        if eta_s < 60 {
+            format!("  \u{f017}  {}s elapsed  \u{f061}  ~{}s left", elapsed_secs, eta_s)
+        } else {
+            format!("  \u{f017}  {}s elapsed  \u{f061}  ~{}m {}s left", elapsed_secs, eta_s / 60, eta_s % 60)
+        }
+    } else {
+        format!("  \u{f017}  {}s elapsed…", elapsed_secs)
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(eta_str, st(app.theme.fg_muted))),
+        rows[5],
+    );
+}
+
+fn draw_delete_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 2 / 3).max(52).min(rect.width);
+    let oh = 9u16;
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let prog = match &app.delete_progress {
+        Some(p) => p.clone(),
+        None    => return,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.warn))
+        .title(Span::styled(
+            format!("  \u{f1f8}  Deleting {} item(s)  \u{2014}  Esc to cancel  ", prog.files_total),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // progress bar
+            Constraint::Length(1), // file counter
+            Constraint::Length(1), // current filename
+            Constraint::Length(1), // ETA
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    // ── Progress bar ─────────────────────────────────────────────────────────
+    let bar_w = rows[1].width as usize;
+    let (pct, filled) = if prog.files_total > 0 {
+        let p = (prog.files_done * 100 / prog.files_total).min(100);
+        let f = (prog.files_done * bar_w as u64 / prog.files_total).min(bar_w as u64) as usize;
+        (p, f)
+    } else {
+        (0, 0)
+    };
+
+    let filled_str: String = app.icons.chrome.progress_fill.repeat(filled);
+    let empty_str:  String = std::iter::repeat('\u{2591}').take(bar_w.saturating_sub(filled)).collect();
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(filled_str, bold(app.theme.warn)),
+        Span::styled(empty_str, st(app.theme.bg_popup)),
+    ])), rows[1]);
+
+    // ── File counter ─────────────────────────────────────────────────────────
+    let current_num = if prog.done { prog.files_total } else { prog.files_done + 1 }.min(prog.files_total);
+    f.render_widget(Paragraph::new(Span::styled(
+        format!("  \u{f1f8}  {}%   File {} of {}", pct, current_num, prog.files_total),
+        st(app.theme.fg_dim),
+    )), rows[2]);
+
+    // ── Current filename ─────────────────────────────────────────────────────
+    let max_name = rows[3].width.saturating_sub(4) as usize;
+    let display_name = if prog.current_file.len() > max_name && max_name > 3 {
+        format!("  \u{2026}{}", &prog.current_file[prog.current_file.len() - max_name + 1..])
+    } else {
+        format!("  {}", prog.current_file)
+    };
+    f.render_widget(Paragraph::new(Span::styled(display_name, st(app.theme.fg_muted))), rows[3]);
+
+    // ── ETA ──────────────────────────────────────────────────────────────────
+    let elapsed_secs = prog.start_time.elapsed().as_secs();
+    let eta_str = if prog.done || pct >= 100 {
+        format!("  \u{f00c}  Done in {}s", elapsed_secs)
+    } else if prog.files_total > 0 && prog.files_done > 0 {
+        let rate = prog.files_done as f64 / elapsed_secs.max(1) as f64;
+        let remaining = prog.files_total.saturating_sub(prog.files_done) as f64 / rate;
+        let eta_s = remaining as u64;
+        if eta_s < 60 {
+            format!("  \u{f017}  {}s elapsed  \u{f061}  ~{}s left", elapsed_secs, eta_s)
+        } else {
+            format!("  \u{f017}  {}s elapsed  \u{f061}  ~{}m {}s left", elapsed_secs, eta_s / 60, eta_s % 60)
+        }
+    } else {
+        format!("  \u{f017}  {}s elapsed\u{2026}", elapsed_secs)
+    };
+    f.render_widget(Paragraph::new(Span::styled(eta_str, st(app.theme.fg_muted))), rows[4]);
+}
+
 pub fn si_size(b: u64) -> String {
     // Use SI base-10 units (GB = 10^9) to match file managers like Nemo/Nautilus
     if b >= 1_000_000_000 { format!("{:.1} GB", b as f64 / 1_000_000_000.0) }
@@ -966,7 +1176,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             Line::from(vec![]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_ver),     st(muted)),
-                Span::styled("0.1.6", bold(fg)),
+                Span::styled("0.1.7", bold(fg)),
             ]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_author),  st(muted)),
@@ -974,7 +1184,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             ]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_license), st(muted)),
-                Span::styled("GPL-3.0-or-later", bold(fg)),
+                Span::styled("VoidDream Proprietary License v1.0", bold(fg)),
             ]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_repo),    st(muted)),

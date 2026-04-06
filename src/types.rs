@@ -179,6 +179,7 @@ pub fn dirs_home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+#[allow(dead_code)]
 pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -288,6 +289,42 @@ pub struct ExtractionProgress {
     pub pid:        Option<u32>,
 }
 
+// ─── CopyProgress ─────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct CopyProgress {
+    /// Name of the file currently being copied.
+    pub current_file:    String,
+    /// Bytes transferred so far (across all files).
+    pub bytes_done:      u64,
+    /// Total bytes to transfer (sum of all source sizes).
+    pub bytes_total:     u64,
+    /// Number of files fully copied so far.
+    pub files_done:      u64,
+    /// Total number of files to copy/move.
+    pub files_total:     u64,
+    /// True when the whole operation is finished (success or error).
+    pub done:            bool,
+    /// First error encountered, if any.
+    pub error:           Option<String>,
+    /// Wall-clock start time for ETA calculation.
+    pub start_time:      Instant,
+    /// True when this is a cut (move) operation.
+    pub is_cut:          bool,
+}
+
+// ─── DeleteProgress ───────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct DeleteProgress {
+    pub current_file: String,
+    pub files_done:   u64,
+    pub files_total:  u64,
+    pub done:         bool,
+    pub error:        Option<String>,
+    pub start_time:   Instant,
+}
+
 // ─── InputMode ────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq)]
@@ -301,6 +338,8 @@ pub enum InputMode {
     Settings,
     Help,
     Extracting,
+    Copying,
+    Deleting,
     RunArgs(PathBuf, bool, String, String), // (path, focus_on_end, start_args, end_args)
     OpenWith(PathBuf, Vec<(String, String)>, usize), // (path, [(label, cmd)], cursor)
     OpenWithCustom(PathBuf),

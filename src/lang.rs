@@ -9,6 +9,7 @@
 /// All user-visible strings in one place.
 /// Add new fields here when new UI text is introduced.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Lang {
     // ── Settings section tabs ─────────────────────────────────────────────────
     pub sec_behaviour:  &'static str,

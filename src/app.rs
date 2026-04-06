@@ -3,7 +3,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
+    sync::{mpsc, Arc, atomic::{AtomicBool, Ordering}},
     time::{Duration, Instant},
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -72,6 +72,14 @@ pub struct App {
     pub extract_progress: Option<ExtractionProgress>,
     pub extract_rx:       Option<mpsc::Receiver<ExtractionProgress>>,
     pub extract_child_pid: Option<u32>,  // PID of extraction process for kill on cancel
+    // Copy/move progress
+    pub copy_progress:   Option<CopyProgress>,
+    pub copy_rx:         Option<mpsc::Receiver<CopyProgress>>,
+    pub copy_cancel:     Option<Arc<AtomicBool>>,
+    // Delete progress
+    pub delete_progress: Option<DeleteProgress>,
+    pub delete_rx:       Option<mpsc::Receiver<DeleteProgress>>,
+    pub delete_cancel:   Option<Arc<AtomicBool>>,
 }
 impl App {
     pub fn new(start: PathBuf, cfg: Config) -> Self {
@@ -114,6 +122,12 @@ impl App {
             extract_progress: None,
             extract_rx: None,
             extract_child_pid: None,
+            copy_progress: None,
+            copy_rx: None,
+            copy_cancel: None,
+            delete_progress: None,
+            delete_rx: None,
+            delete_cancel: None,
         }
     }
     pub fn tab(&self)         -> &Tab     { &self.tabs[self.tab_idx] }
@@ -203,6 +217,73 @@ impl App {
                 }
             }
         }
+        // Drain copy/move progress channel
+        if self.copy_rx.is_some() {
+            let mut last: Option<CopyProgress> = None;
+            let mut done = false;
+            if let Some(rx) = &self.copy_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Some(p) = last {
+                if done {
+                    if let Some(ref e) = p.error.clone() {
+                        self.msg(&format!("Copy error: {}", e), true);
+                    } else {
+                        let verb = if p.is_cut { "Moved" } else { "Copied" };
+                        self.msg(&format!("{} {} file(s)", verb, p.files_total), false);
+                    }
+                    self.tab_mut().refresh();
+                    self.copy_rx       = None;
+                    self.copy_progress = None;
+                    self.copy_cancel   = None;
+                    self.mode          = InputMode::Normal;
+                } else {
+                    let st = self.copy_progress.as_ref()
+                        .map(|c| c.start_time)
+                        .unwrap_or_else(Instant::now);
+                    self.copy_progress = Some(CopyProgress { start_time: st, ..p });
+                }
+            }
+        }
+
+        // Drain delete progress channel
+        if self.delete_rx.is_some() {
+            let mut last: Option<DeleteProgress> = None;
+            let mut done = false;
+            if let Some(rx) = &self.delete_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Some(p) = last {
+                if done {
+                    if let Some(ref e) = p.error.clone() {
+                        self.msg(&format!("{}: {}", self.lang.msg_error, e), true);
+                    } else {
+                        self.msg(&format!("{} {} {}", self.lang.msg_deleted, p.files_total, self.lang.msg_deleted_items), false);
+                    }
+                    self.tab_mut().refresh();
+                    self.delete_rx       = None;
+                    self.delete_progress = None;
+                    self.delete_cancel   = None;
+                    self.mode            = InputMode::Normal;
+                } else {
+                    let st = self.delete_progress.as_ref()
+                        .map(|d| d.start_time)
+                        .unwrap_or_else(Instant::now);
+                    self.delete_progress = Some(DeleteProgress { start_time: st, ..p });
+                }
+            }
+        }
+
         // Drain extraction progress channel
         if self.extract_rx.is_some() {
             let mut last: Option<ExtractionProgress> = None;
@@ -328,36 +409,160 @@ impl App {
     }
     pub fn paste_files(&mut self) {
         if self.yank.is_empty() { self.msg(self.lang.msg_nothing_to_paste, true); return; }
-        let dst = self.tab().cwd.clone(); let mut errors = vec![];
-        for src in &self.yank {
-            let target = dst.join(src.file_name().unwrap_or_default());
-            let res = if self.yank_cut {
-                fs::rename(src, &target).or_else(|_| {
-                    if src.is_dir() { copy_dir(src, &target).and_then(|_| fs::remove_dir_all(src)) }
-                    else { fs::copy(src, &target).map(|_|()).and_then(|_| fs::remove_file(src)) }
-                })
-            } else if src.is_dir() { copy_dir(src, &target) }
-            else { fs::copy(src, &target).map(|_|()) };
-            if let Err(e) = res { errors.push(e.to_string()); }
-        }
-        if self.yank_cut { self.yank.clear(); self.yank_cut = false; }
-        self.tab_mut().refresh();
-        if errors.is_empty() { self.msg(self.lang.msg_pasted, false); }
-        else { self.msg(&format!("{}: {}", self.lang.msg_error, errors[0]), true); }
+        let dst    = self.tab().cwd.clone();
+        let srcs   = self.yank.clone();
+        let is_cut = self.yank_cut;
+
+        // Pre-calculate total byte size and file count so the progress bar has a target.
+        let (bytes_total, files_total) = count_copy_totals(&srcs);
+
+        let (tx, rx)   = mpsc::channel::<CopyProgress>();
+        let start_time = Instant::now();
+        let cancel     = Arc::new(AtomicBool::new(false));
+        let cancel_thr = Arc::clone(&cancel);
+
+        std::thread::spawn(move || {
+            // Shared atomic counters so recursive dir copies update the display correctly
+            let bytes_done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let files_done = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut first_error: Option<String> = None;
+
+            for src in &srcs {
+                if cancel_thr.load(Ordering::Relaxed) { break; }
+
+                let target = dst.join(src.file_name().unwrap_or_default());
+                let name   = src.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+
+                let bd = bytes_done.load(Ordering::Relaxed);
+                let fd = files_done.load(Ordering::Relaxed);
+
+                // Send "starting this file" update
+                let _ = tx.send(CopyProgress {
+                    current_file: name.clone(),
+                    bytes_done: bd, bytes_total,
+                    files_done: fd, files_total,
+                    done: false, error: None,
+                    start_time, is_cut,
+                });
+
+                let res: std::io::Result<()> = if is_cut {
+                    let precomputed = src_byte_size(src);
+                    fs::rename(src, &target)
+                        .map(|_| {
+                            bytes_done.fetch_add(precomputed, Ordering::Relaxed);
+                            files_done.fetch_add(1, Ordering::Relaxed);
+                        })
+                        .or_else(|_| {
+                            copy_with_progress(
+                                src, &target,
+                                &bytes_done, bytes_total,
+                                &files_done, files_total,
+                                start_time, is_cut, &tx, &cancel_thr,
+                            )?;
+                            if src.is_dir() { fs::remove_dir_all(src)?; }
+                            else            { fs::remove_file(src)?; }
+                            Ok(())
+                        })
+                } else {
+                    copy_with_progress(
+                        src, &target,
+                        &bytes_done, bytes_total,
+                        &files_done, files_total,
+                        start_time, is_cut, &tx, &cancel_thr,
+                    )
+                };
+
+                if let Err(e) = res {
+                    if first_error.is_none() { first_error = Some(e.to_string()); }
+                }
+            }
+
+            let bd = bytes_done.load(Ordering::Relaxed);
+            let fd = files_done.load(Ordering::Relaxed);
+            let _ = tx.send(CopyProgress {
+                current_file: String::new(),
+                bytes_done: bytes_total.max(bd),
+                bytes_total,
+                files_done: fd,
+                files_total,
+                done: true,
+                error: first_error,
+                start_time, is_cut,
+            });
+        });
+
+        // Always clear yank after paste starts (cut or copy)
+        self.yank.clear();
+        self.yank_cut    = false;
+        self.copy_cancel = Some(cancel);
+        self.copy_progress = Some(CopyProgress {
+            current_file: String::new(),
+            bytes_done: 0, bytes_total,
+            files_done: 0, files_total,
+            done: false, error: None,
+            start_time, is_cut,
+        });
+        self.copy_rx = Some(rx);
+        self.mode    = InputMode::Copying;
     }
     pub fn delete_files(&mut self) {
         let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
             self.tab().selected.iter().cloned().collect()
         } else if let Some(p) = self.tab().current().cloned() { vec![p] }
         else { return; };
-        let mut errors = vec![];
-        for p in &targets {
-            let res: std::io::Result<()> = if p.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) };
-            if let Err(e) = res { errors.push(e.to_string()); }
-        }
-        self.tab_mut().selected.clear(); self.tab_mut().refresh();
-        if errors.is_empty() { self.msg(&format!("{} {} {}", self.lang.msg_deleted, targets.len(), self.lang.msg_deleted_items), false); }
-        else { self.msg(&format!("{}: {}", self.lang.msg_error, errors[0]), true); }
+
+        // Count all files/dirs recursively so we have a total for the bar
+        let files_total = count_delete_total(&targets);
+
+        let (tx, rx)   = mpsc::channel::<DeleteProgress>();
+        let start_time = Instant::now();
+        let cancel     = Arc::new(AtomicBool::new(false));
+        let cancel_thr = Arc::clone(&cancel);
+
+        std::thread::spawn(move || {
+            let files_done = Arc::new(AtomicU64::new(0));
+            let mut first_error: Option<String> = None;
+
+            for p in &targets {
+                if cancel_thr.load(Ordering::Relaxed) { break; }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+
+                let _ = tx.send(DeleteProgress {
+                    current_file: name,
+                    files_done:   files_done.load(Ordering::Relaxed),
+                    files_total,
+                    done: false, error: None, start_time,
+                });
+
+                let res = delete_with_progress(p, &files_done, files_total, start_time, &tx, &cancel_thr);
+                if let Err(e) = res {
+                    if first_error.is_none() { first_error = Some(e.to_string()); }
+                }
+            }
+
+            let fd = files_done.load(Ordering::Relaxed);
+            let _ = tx.send(DeleteProgress {
+                current_file: String::new(),
+                files_done: fd,
+                files_total,
+                done: true,
+                error: first_error,
+                start_time,
+            });
+        });
+
+        self.tab_mut().selected.clear();
+        self.delete_cancel   = Some(cancel);
+        self.delete_progress = Some(DeleteProgress {
+            current_file: String::new(),
+            files_done: 0, files_total,
+            done: false, error: None, start_time,
+        });
+        self.delete_rx = Some(rx);
+        self.mode      = InputMode::Deleting;
     }
     /// Spawn an external program silently (no stdin/stdout/stderr).
     fn spawn_silent(cmd: &str, arg: &std::path::Path) {
@@ -829,6 +1034,188 @@ impl App {
             self.fuzzy_query.clear(); self.fuzzy_results.clear();
         }
     }
+}
+
+// ── Copy-with-progress helpers ────────────────────────────────────────────────
+
+/// Total (bytes, file_count) for a list of source paths (recursive for dirs).
+fn count_copy_totals(srcs: &[PathBuf]) -> (u64, u64) {
+    let mut bytes: u64 = 0; let mut files: u64 = 0;
+    for src in srcs { count_recursive(src, &mut bytes, &mut files); }
+    (bytes, files)
+}
+
+fn count_recursive(p: &Path, bytes: &mut u64, files: &mut u64) {
+    if p.is_dir() {
+        if let Ok(rd) = fs::read_dir(p) {
+            for e in rd.filter_map(|e| e.ok()) { count_recursive(&e.path(), bytes, files); }
+        }
+    } else {
+        *files += 1;
+        *bytes += p.metadata().map(|m| m.len()).unwrap_or(0);
+    }
+}
+
+/// Size of a path (for accounting after an atomic rename).
+fn src_byte_size(p: &Path) -> u64 {
+    if p.is_dir() {
+        let (b, _) = count_copy_totals(&[p.to_path_buf()]);
+        b
+    } else {
+        p.metadata().map(|m| m.len()).unwrap_or(0)
+    }
+}
+
+type AtomicU64  = std::sync::atomic::AtomicU64;
+type CancelFlag = Arc<AtomicBool>;
+
+/// Copy src → target recursively, updating shared atomic counters on every
+/// 256 KiB chunk and every completed file.  Returns Err if cancelled.
+#[allow(clippy::too_many_arguments)]
+fn copy_with_progress(
+    src: &Path, target: &Path,
+    bytes_done: &Arc<AtomicU64>, bytes_total: u64,
+    files_done: &Arc<AtomicU64>, files_total: u64,
+    start_time: Instant, is_cut: bool,
+    tx: &mpsc::Sender<CopyProgress>,
+    cancel: &CancelFlag,
+) -> std::io::Result<()> {
+    if src.is_dir() {
+        copy_dir_progress(src, target, bytes_done, bytes_total,
+            files_done, files_total, start_time, is_cut, tx, cancel)
+    } else {
+        copy_file_progress(src, target, bytes_done, bytes_total,
+            files_done, files_total, start_time, is_cut, tx, cancel)
+    }
+}
+
+/// Copy a single file in 256 KiB chunks, emitting a progress update every chunk.
+#[allow(clippy::too_many_arguments)]
+fn copy_file_progress(
+    src: &Path, target: &Path,
+    bytes_done: &Arc<AtomicU64>, bytes_total: u64,
+    files_done: &Arc<AtomicU64>, files_total: u64,
+    start_time: Instant, is_cut: bool,
+    tx: &mpsc::Sender<CopyProgress>,
+    cancel: &CancelFlag,
+) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+    let mut reader  = std::io::BufReader::new(fs::File::open(src)?);
+    let mut writer  = fs::File::create(target)?;
+    let mut buf     = vec![0u8; 256 * 1024];
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            // Clean up partial file on cancel
+            drop(writer);
+            let _ = fs::remove_file(target);
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        writer.write_all(&buf[..n])?;
+        bytes_done.fetch_add(n as u64, Ordering::Relaxed);
+
+        let bd = bytes_done.load(Ordering::Relaxed);
+        let fd = files_done.load(Ordering::Relaxed);
+        let _ = tx.send(CopyProgress {
+            current_file: name.clone(),
+            bytes_done: bd.min(bytes_total),
+            bytes_total,
+            files_done: fd, files_total,
+            done: false, error: None,
+            start_time, is_cut,
+        });
+    }
+
+    // File fully written — increment the completed-files counter
+    files_done.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Recursively copy a directory tree.
+#[allow(clippy::too_many_arguments)]
+fn copy_dir_progress(
+    src: &Path, target: &Path,
+    bytes_done: &Arc<AtomicU64>, bytes_total: u64,
+    files_done: &Arc<AtomicU64>, files_total: u64,
+    start_time: Instant, is_cut: bool,
+    tx: &mpsc::Sender<CopyProgress>,
+    cancel: &CancelFlag,
+) -> std::io::Result<()> {
+    fs::create_dir_all(target)?;
+    if let Ok(rd) = fs::read_dir(src) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+            }
+            let child_src    = entry.path();
+            let child_target = target.join(entry.file_name());
+            copy_with_progress(
+                &child_src, &child_target,
+                bytes_done, bytes_total,
+                files_done, files_total,
+                start_time, is_cut, tx, cancel,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// ── Delete-with-progress helpers ──────────────────────────────────────────────
+
+fn count_delete_total(targets: &[PathBuf]) -> u64 {
+    let mut n = 0u64;
+    for p in targets { count_delete_recursive(p, &mut n); }
+    n
+}
+
+fn count_delete_recursive(p: &Path, n: &mut u64) {
+    *n += 1;
+    if p.is_dir() {
+        if let Ok(rd) = fs::read_dir(p) {
+            for e in rd.filter_map(|e| e.ok()) { count_delete_recursive(&e.path(), n); }
+        }
+    }
+}
+
+fn delete_with_progress(
+    p: &Path,
+    files_done: &Arc<AtomicU64>, files_total: u64,
+    start_time: Instant,
+    tx: &mpsc::Sender<DeleteProgress>,
+    cancel: &CancelFlag,
+) -> std::io::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+    }
+
+    if p.is_dir() {
+        // Delete children one by one so we can show progress and respect cancel
+        if let Ok(rd) = fs::read_dir(p) {
+            for entry in rd.filter_map(|e| e.ok()) {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+                }
+                let child = entry.path();
+                let name  = child.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+                let _ = tx.send(DeleteProgress {
+                    current_file: name,
+                    files_done:   files_done.load(Ordering::Relaxed),
+                    files_total,
+                    done: false, error: None, start_time,
+                });
+                delete_with_progress(&child, files_done, files_total, start_time, tx, cancel)?;
+            }
+        }
+        fs::remove_dir(p)?;
+    } else {
+        fs::remove_file(p)?;
+    }
+
+    files_done.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
 fn collect_all_streaming(dir: &Path, tx: &mpsc::Sender<PathBuf>, depth: usize, show_hidden: bool) {

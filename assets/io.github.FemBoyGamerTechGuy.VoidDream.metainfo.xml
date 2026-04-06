@@ -13,7 +13,7 @@
   <url type="homepage">https://github.com/FemBoyGamerTechGuy/VoidDream</url>
   <url type="bugtracker">https://github.com/FemBoyGamerTechGuy/VoidDream/issues</url>
   <metadata_license>MIT</metadata_license>
-  <project_license>GPL-3.0-or-later</project_license>
+  <project_license>LicenseRef-VoidDream-1.0</project_license>
   <developer id="io.github.FemBoyGamerTechGuy">
     <name>FemBoyGamerTechGuy</name>
   </developer>

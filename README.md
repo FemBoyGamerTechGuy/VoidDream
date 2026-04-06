@@ -4,10 +4,10 @@
 
 **A dreamy void-themed TUI file manager built with Rust and Ratatui.**
 
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blueviolet?style=flat-square)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/license-VoidDream%20Proprietary%20v1.0-blueviolet?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Rust version](https://img.shields.io/badge/rust-%3E%3D1.85-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.6-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.1.7-blueviolet?style=flat-square)](CHANGELOG.md)
 [![Status: Active](https://img.shields.io/badge/status-active%20development-brightgreen?style=flat-square)](CHANGELOG.md)
 [![Part of Faded Dream](https://img.shields.io/badge/part%20of-Faded%20Dream-purple?style=flat-square)](https://github.com/FemBoyGamerTechGuy/Faded-Dream-dotfiles)
 
@@ -174,10 +174,10 @@ VoidDream is part of the [Faded Dream dotfiles](https://github.com/FemBoyGamerTe
 
 ## License
 
-Copyright (C) 2026 FemBoyGamerTechGuy
+Copyright (C) 2026 FemBoyGamerTechGuy. All rights reserved.
 
-This project is licensed under the **GNU General Public License v3.0**.
+This project is licensed under the **VoidDream Proprietary License v1.0**.
 
-You are free to use, modify, and distribute this project, but any derivative work must also be open source under the same license. Nobody can take this project and release it under a different or proprietary license.
+Personal use is free and unrestricted (privately). Forking, redistribution, and commercial use all require explicit written permission from the author. The license cannot be removed, replaced, or relicensed by anyone other than the author. Violations may result in a DMCA takedown, cease and desist, or legal action.
 
 See the [LICENSE](LICENSE) file for the full license text.

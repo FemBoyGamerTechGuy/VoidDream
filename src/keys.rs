@@ -80,6 +80,38 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             }
             return false;
         }
+        InputMode::Copying => {
+            if key == KeyCode::Esc {
+                // Signal the background thread to stop — it will clean up partial files
+                if let Some(ref cancel) = app.copy_cancel {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                app.copy_rx       = None;
+                app.copy_progress = None;
+                app.copy_cancel   = None;
+                app.mode          = InputMode::Normal;
+                // Clear yank so the files aren't still queued for copy
+                app.yank.clear();
+                app.yank_cut = false;
+                app.tab_mut().refresh();
+                app.msg("Copy cancelled", true);
+            }
+            return false;
+        }
+        InputMode::Deleting => {
+            if key == KeyCode::Esc {
+                if let Some(ref cancel) = app.delete_cancel {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                app.delete_rx       = None;
+                app.delete_progress = None;
+                app.delete_cancel   = None;
+                app.mode            = InputMode::Normal;
+                app.tab_mut().refresh();
+                app.msg("Delete cancelled", true);
+            }
+            return false;
+        }
     }
     let cfg = &app.cfg;
 

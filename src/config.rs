@@ -838,9 +838,9 @@ impl SettingsState {
             "fixed_help"       => "?  (fixed)".into(),
             "fixed_quit2"      => "Esc  (fixed)".into(),
             "fixed_about_app"     => "VoidDream".into(),
-            "fixed_about_ver"     => "0.1.6".into(),
+            "fixed_about_ver"     => "0.1.7".into(),
             "fixed_about_author"  => "FemBoyGamerTechGuy".into(),
-            "fixed_about_license" => "GPL-3.0-or-later".into(),
+            "fixed_about_license" => "VoidDream Proprietary License v1.0".into(),
             "fixed_about_repo"    => "github.com/FemBoyGamerTechGuy/VoidDream".into(),
             _ => String::new(),
         }

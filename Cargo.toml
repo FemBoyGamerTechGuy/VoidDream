@@ -1,11 +1,11 @@
 [package]
 name = "VoidDream"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "A dreamy void-themed TUI file manager built with Rust and Ratatui"
 authors = ["FemBoyGamerTechGuy"]
 repository = "https://github.com/FemBoyGamerTechGuy/VoidDream"
-license = "GPL-3.0-or-later"
+license = "LicenseRef-VoidDream-1.0"
 
 [[bin]]
 name = "VoidDream"
