@@ -12,16 +12,16 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         InputMode::DriveManager => {
             match key {
                 KeyCode::Esc => { app.mode = InputMode::Normal; }
-                KeyCode::Up   | KeyCode::Char('k') => {
+                _ if crate::config::key_matches(&app.cfg.key_nav_up,       key, mods) => {
                     if app.drive_cursor > 0 { app.drive_cursor -= 1; }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                _ if crate::config::key_matches(&app.cfg.key_nav_down,     key, mods) => {
                     if app.drive_cursor + 1 < app.drive_devices.len() { app.drive_cursor += 1; }
                 }
-                KeyCode::Char('m') => { app.drive_mount(); }
-                KeyCode::Char('u') => { app.drive_unmount(); }
-                KeyCode::Char('r') => { app.drive_devices = crate::drives::list_devices(); }
-                KeyCode::Enter     => { app.drive_navigate(); }
+                _ if crate::config::key_matches(&app.cfg.key_drive_mount,   key, mods) => { app.drive_mount(); }
+                _ if crate::config::key_matches(&app.cfg.key_drive_unmount, key, mods) => { app.drive_unmount(); }
+                _ if crate::config::key_matches(&app.cfg.key_drive_refresh, key, mods) => { app.drive_devices = crate::drives::list_devices(); }
+                KeyCode::Enter => { app.drive_navigate(); }
                 _ => {}
             }
             return false;
@@ -31,6 +31,10 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
         InputMode::RunArgs(..) => { handle_runargs_key(app, key); return false; }
         InputMode::OpenWith(..) => { handle_openwith_key(app, key); return false; }
         InputMode::OpenWithCustom(..) => { handle_openwith_custom_key(app, key); return false; }
+        InputMode::FirstRunSetup => { handle_setup_key(app, key); return false; }
+        InputMode::KeybindMenu   => { handle_keybind_menu(app, key); return false; }
+        InputMode::KeyCapture    => { handle_key_capture(app, key, mods); return false; }
+        InputMode::KeybindRemove => { handle_keybind_remove(app, key); return false; }
         InputMode::Confirm => {
             app.mode = InputMode::Normal;
             if matches!(key, KeyCode::Char('y')|KeyCode::Char('Y')) { app.delete_files(); }
@@ -112,75 +116,98 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
             }
             return false;
         }
+        InputMode::Trashing => {
+            if key == KeyCode::Esc {
+                app.trash_rx       = None;
+                app.trash_progress = None;
+                app.mode           = InputMode::Normal;
+                app.tab_mut().refresh();
+                app.msg("Trash cancelled", true);
+            }
+            return false;
+        }
+        InputMode::TrashBrowser => {
+            match key {
+                KeyCode::Esc | KeyCode::Char('q') => { app.mode = InputMode::Normal; }
+                KeyCode::Up   | KeyCode::Char('k') => {
+                    if app.trash_cursor > 0 { app.trash_cursor -= 1; }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if app.trash_cursor + 1 < app.trash_entries.len() { app.trash_cursor += 1; }
+                }
+                KeyCode::Char('r') | KeyCode::Enter => { app.trash_restore(); }
+                KeyCode::Char('d') => { app.trash_purge_selected(); }
+                KeyCode::Char('D') => { app.trash_empty(); }
+                _ => {}
+            }
+            return false;
+        }
     }
     let cfg = &app.cfg;
+    use crate::config::key_matches;
+
+    // All actions now use key_matches() which supports comma-separated multi-bindings
+    // and both character keys and special keys (Up, Down, Enter, etc.)
+    if key_matches(&cfg.key_nav_up,    key, mods) { app.tab_mut().move_cursor(-1); return false; }
+    if key_matches(&cfg.key_nav_down,  key, mods) { app.tab_mut().move_cursor(1);  return false; }
+    if key_matches(&cfg.key_nav_left,  key, mods) { app.tab_mut().leave();          return false; }
+    if key_matches(&cfg.key_nav_right, key, mods) { app.open_current();             return false; }
+    if key_matches(&cfg.key_page_up,   key, mods) { app.tab_mut().move_cursor(-10); return false; }
+    if key_matches(&cfg.key_page_down, key, mods) { app.tab_mut().move_cursor(10);  return false; }
+    if key_matches(&cfg.key_first,     key, mods) { app.tab_mut().state.select(Some(0)); return false; }
+    if key_matches(&cfg.key_last,      key, mods) {
+        let n = app.tab().visible().len();
+        if n > 0 { app.tab_mut().state.select(Some(n - 1)); }
+        return false;
+    }
 
     match key {
-        KeyCode::Up        => app.tab_mut().move_cursor(-1),
-        KeyCode::Down      => app.tab_mut().move_cursor(1),
-        KeyCode::Left  | KeyCode::Backspace => app.tab_mut().leave(),
-        KeyCode::Right | KeyCode::Enter     => app.open_current(),
-        KeyCode::PageUp    => app.tab_mut().move_cursor(-10),
-        KeyCode::PageDown  => app.tab_mut().move_cursor(10),
-        KeyCode::Home      => { app.tab_mut().state.select(Some(0)); }
-        KeyCode::End       => { let n=app.tab().visible().len(); if n>0 { app.tab_mut().state.select(Some(n-1)); } }
-        KeyCode::Tab if app.cfg.key_cycle_tab == "Tab" => {
-            app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
-        }
-        KeyCode::Char(' ') if cfg.key_select == "Space" => app.tab_mut().toggle_select(),
-        KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) && cfg.key_select_all == "Ctrl+a" => app.tab_mut().select_all(),
-        KeyCode::Char('A') => app.tab_mut().select_all(),
-        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => app.tab_mut().deselect_all(),
-        KeyCode::Char(c) => {
-            let s = c.to_string();
-            if s == cfg.key_copy {
-                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
-                else { app.yank_files(false); }
-            } else if s == cfg.key_cut {
-                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
-                else { app.yank_files(true); }
-            } else if s == cfg.key_paste {
-                app.paste_files();
-            } else if s == cfg.key_delete {
-                if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
-                else { app.mode = InputMode::Confirm; }
-            } else if s == cfg.key_rename {
-                if let Some(p) = app.tab().current().cloned() {
-                    let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
-                    app.input_buf = name.clone(); app.mode = InputMode::Rename(name);
-                }
-            } else if s == cfg.key_new_file {
-                app.input_buf.clear(); app.mode = InputMode::NewFile;
-            } else if s == cfg.key_new_dir {
-                app.input_buf.clear(); app.mode = InputMode::NewDir;
-            } else if s == cfg.key_search {
-                app.open_fuzzy();
-            } else if s == cfg.key_toggle_hidden {
-                let h = !app.tab().show_hidden;
-                app.tab_mut().show_hidden = h; app.tab_mut().refresh();
-                app.msg(if h { app.lang.msg_hidden_shown } else { app.lang.msg_hidden_hidden }, false);
-            } else if s == cfg.key_cycle_tab {
-                app.tab_idx = (app.tab_idx + 1) % app.tabs.len();
-            } else if s == cfg.key_new_tab {
-                app.new_tab();
-            } else if s == cfg.key_close_tab {
-                app.close_tab();
-            } else if s == cfg.key_quit {
-                return true;
-            } else if c == 'k' {
-                // Open-with context menu
-                app.open_with_menu();
-            } else if c == ':' {
-                app.mode = InputMode::Settings;
-            } else if c == '?' {
-                app.mode = InputMode::Help;
-            } else if c == 'D' {
-                app.open_drive_manager();
-            }
-        }
         KeyCode::Esc => return true,
         _ => {}
     }
+
+    if key_matches(&cfg.key_select,         key, mods) { app.tab_mut().toggle_select(); }
+    else if key_matches(&cfg.key_select_all, key, mods) { app.tab_mut().select_all(); }
+    else if key_matches(&cfg.key_select_all_alt, key, mods) { app.tab_mut().select_all(); }
+    else if key_matches(&cfg.key_deselect,   key, mods) { app.tab_mut().deselect_all(); }
+    else if key_matches(&cfg.key_copy,       key, mods) {
+        if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
+        else { app.yank_files(false); }
+    }
+    else if key_matches(&cfg.key_cut,        key, mods) {
+        if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
+        else { app.yank_files(true); }
+    }
+    else if key_matches(&cfg.key_paste,      key, mods) { app.paste_files(); }
+    else if key_matches(&cfg.key_delete,     key, mods) {
+        if app.tab().selected.is_empty() { app.msg(app.lang.msg_select_first, true); }
+        else { app.mode = InputMode::Confirm; }
+    }
+    else if key_matches(&cfg.key_trash,      key, mods) { app.trash_files(); }
+    else if key_matches(&cfg.key_rename,     key, mods) {
+        if let Some(p) = app.tab().current().cloned() {
+            let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
+            app.input_buf = name.clone(); app.input_cursor = name.len(); app.mode = InputMode::Rename(name);
+        }
+    }
+    else if key_matches(&cfg.key_new_file,      key, mods) { app.input_buf.clear(); app.input_cursor = 0; app.mode = InputMode::NewFile; }
+    else if key_matches(&cfg.key_new_dir,       key, mods) { app.input_buf.clear(); app.input_cursor = 0; app.mode = InputMode::NewDir; }
+    else if key_matches(&cfg.key_search,        key, mods) { app.open_fuzzy(); }
+    else if key_matches(&cfg.key_toggle_hidden, key, mods) {
+        let h = !app.tab().show_hidden;
+        app.tab_mut().show_hidden = h; app.tab_mut().refresh();
+        app.msg(if h { app.lang.msg_hidden_shown } else { app.lang.msg_hidden_hidden }, false);
+    }
+    else if key_matches(&cfg.key_cycle_tab,     key, mods) { app.tab_idx = (app.tab_idx + 1) % app.tabs.len(); }
+    else if key_matches(&cfg.key_new_tab,       key, mods) { app.new_tab(); }
+    else if key_matches(&cfg.key_close_tab,     key, mods) { app.close_tab(); }
+    else if key_matches(&cfg.key_open_with,     key, mods) { app.open_with_menu(); }
+    else if key_matches(&cfg.key_settings,      key, mods) { app.mode = InputMode::Settings; }
+    else if key_matches(&cfg.key_help,          key, mods) { app.mode = InputMode::Help; }
+    else if key_matches(&cfg.key_drives,        key, mods) { app.open_drive_manager(); }
+    else if key_matches(&cfg.key_trash_browser, key, mods) { app.open_trash_browser(); }
+    else if key_matches(&cfg.key_quit,          key, mods) { return true; }
+
     false
 }
 
@@ -228,10 +255,24 @@ pub fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> 
     // ── Normal navigation ──────────────────────────────────────────────────────
     match key {
         KeyCode::Esc  => { app.mode = InputMode::Normal; }
-        KeyCode::Up   => { if app.settings.cursor > 0 { app.settings.cursor -= 1; } }
+        KeyCode::Up   => {
+            let items = SettingsState::section_items(&app.settings.section);
+            loop {
+                if app.settings.cursor == 0 { break; }
+                app.settings.cursor -= 1;
+                let (k, _) = items[app.settings.cursor];
+                if !k.starts_with("fixed_header_") { break; }
+            }
+        }
         KeyCode::Down => {
-            let m = SettingsState::section_items(&app.settings.section).len().saturating_sub(1);
-            if app.settings.cursor < m { app.settings.cursor += 1; }
+            let items = SettingsState::section_items(&app.settings.section);
+            let m = items.len().saturating_sub(1);
+            loop {
+                if app.settings.cursor >= m { break; }
+                app.settings.cursor += 1;
+                let (k, _) = items[app.settings.cursor];
+                if !k.starts_with("fixed_header_") { break; }
+            }
         }
         KeyCode::Left => {
             app.settings.section = match app.settings.section {
@@ -249,11 +290,16 @@ pub fn handle_settings_key(app: &mut App, key: KeyCode, _mods: KeyModifiers) -> 
         }
         KeyCode::Enter => {
             let items = SettingsState::section_items(&app.settings.section);
-            let (k, _) = items[app.settings.cursor];
+            let (k, label) = items[app.settings.cursor];
             if k.starts_with("fixed_") {
-                // Fixed keys are informational — not configurable
+                // Fixed — informational only
+            } else if k.starts_with("key_") && app.settings.section == SettingsSection::Keybinds {
+                // Open keybind editor overlay
+                app.keybind_key         = k.to_string();
+                app.keybind_label       = label.to_string();
+                app.keybind_menu_cursor = 0;
+                app.mode                = InputMode::KeybindMenu;
             } else if let Some(opts) = SettingsState::dropdown_options(k) {
-                // Open dropdown — pre-select current value
                 let cur_val = SettingsState::get_value(k, &app.cfg);
                 app.settings.dd_cursor = opts.iter().position(|o| o == &cur_val).unwrap_or(0);
                 app.settings.dropdown  = true;
@@ -388,44 +434,87 @@ pub fn handle_runargs_key(app: &mut App, key: KeyCode) {
 
 pub fn handle_input_key(app: &mut App, key: KeyCode) {
     match key {
-        KeyCode::Esc   => { app.mode=InputMode::Normal; app.input_buf.clear(); }
+        KeyCode::Esc => {
+            app.mode = InputMode::Normal;
+            app.input_buf.clear();
+            app.input_cursor = 0;
+        }
         KeyCode::Enter => {
             let val  = app.input_buf.clone();
             let mode = std::mem::replace(&mut app.mode, InputMode::Normal);
             app.input_buf.clear();
+            app.input_cursor = 0;
             if val.is_empty() { return; }
             match mode {
                 InputMode::Rename(orig) if val != orig => {
-                    let src=app.tab().cwd.join(&orig); let dst=app.tab().cwd.join(&val);
-                    match fs::rename(&src,&dst) { Ok(_)=>{app.tab_mut().refresh();app.msg(&format!("Renamed \u{2192} {}",val),false);} Err(e)=>app.msg(&e.to_string(),true), }
+                    let src = app.tab().cwd.join(&orig);
+                    let dst = app.tab().cwd.join(&val);
+                    match fs::rename(&src, &dst) {
+                        Ok(_)  => { app.tab_mut().refresh(); app.msg(&format!("Renamed \u{2192} {}", val), false); }
+                        Err(e) => app.msg(&e.to_string(), true),
+                    }
                 }
                 InputMode::NewFile => {
-                    let t=app.tab().cwd.join(&val);
-                    match fs::File::create(&t) { Ok(_)=>{app.tab_mut().refresh();app.msg(&format!("Created {}",val),false);} Err(e)=>app.msg(&e.to_string(),true), }
+                    let t = app.tab().cwd.join(&val);
+                    match fs::File::create(&t) {
+                        Ok(_)  => { app.tab_mut().refresh(); app.msg(&format!("Created {}", val), false); }
+                        Err(e) => app.msg(&e.to_string(), true),
+                    }
                 }
                 InputMode::NewDir => {
-                    let t=app.tab().cwd.join(&val);
-                    match fs::create_dir_all(&t) { Ok(_)=>{app.tab_mut().refresh();app.msg(&format!("Created dir {}",val),false);} Err(e)=>app.msg(&e.to_string(),true), }
+                    let t = app.tab().cwd.join(&val);
+                    match fs::create_dir_all(&t) {
+                        Ok(_)  => { app.tab_mut().refresh(); app.msg(&format!("Created dir {}", val), false); }
+                        Err(e) => app.msg(&e.to_string(), true),
+                    }
                 }
                 _ => {}
             }
         }
-        KeyCode::Backspace => { app.input_buf.pop(); }
-        KeyCode::Char(c)   => app.input_buf.push(c),
+        KeyCode::Left => {
+            // Move cursor left one character (unicode-safe)
+            if app.input_cursor > 0 {
+                app.input_cursor -= 1;
+                while app.input_cursor > 0 && !app.input_buf.is_char_boundary(app.input_cursor) {
+                    app.input_cursor -= 1;
+                }
+            }
+        }
+        KeyCode::Right => {
+            // Move cursor right one character (unicode-safe)
+            if app.input_cursor < app.input_buf.len() {
+                app.input_cursor += 1;
+                while app.input_cursor < app.input_buf.len() && !app.input_buf.is_char_boundary(app.input_cursor) {
+                    app.input_cursor += 1;
+                }
+            }
+        }
+        KeyCode::Home => { app.input_cursor = 0; }
+        KeyCode::End  => { app.input_cursor = app.input_buf.len(); }
+        KeyCode::Backspace => {
+            // Delete character before cursor
+            if app.input_cursor > 0 {
+                let mut pos = app.input_cursor - 1;
+                while pos > 0 && !app.input_buf.is_char_boundary(pos) { pos -= 1; }
+                app.input_buf.remove(pos);
+                app.input_cursor = pos;
+            }
+        }
+        KeyCode::Delete => {
+            // Delete character at cursor
+            if app.input_cursor < app.input_buf.len() {
+                app.input_buf.remove(app.input_cursor);
+            }
+        }
+        KeyCode::Char(c) => {
+            app.input_buf.insert(app.input_cursor, c);
+            app.input_cursor += c.len_utf8();
+        }
         _ => {}
     }
 }
 
 /// Spawn a shell command silently (no stdin/stdout/stderr).
-fn spawn_sh_silent(cmd: &str) {
-    let _ = std::process::Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
 pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => { app.mode = InputMode::Normal; }
@@ -450,14 +539,27 @@ pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
                         app.mode = InputMode::OpenWithCustom(path);
                     } else {
                         let cmd = cmd.clone();
-                        let path_escaped = path.to_string_lossy().replace("'", "'\''");
-                        let full_cmd = if cmd.contains(' ') {
-                            format!("{} '{}'", cmd, path_escaped)
+                        // Terminal apps (editor) need the TUI to suspend and
+                        // hand over the terminal — use nvim_path mechanism.
+                        if cmd == app.cfg.opener_editor {
+                            app.msg(&format!("Opening with {}", cmd), false);
+                            app.nvim_path = Some(path);
                         } else {
-                            format!("'{}' '{}'", cmd, path_escaped)
-                        };
-                        spawn_sh_silent(&full_cmd);
-                        app.msg(&format!("Opening with {}", cmd), false);
+                            // GUI apps and xdg-open must be spawned directly
+                            // (not via sh -c) so they inherit the full session
+                            // environment including DISPLAY, WAYLAND_DISPLAY,
+                            // DBUS_SESSION_BUS_ADDRESS etc.
+                            let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+                            let bin = parts[0];
+                            let mut command = std::process::Command::new(bin);
+                            if parts.len() > 1 { command.arg(parts[1]); }
+                            command.arg(&path)
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null());
+                            let _ = command.spawn();
+                            app.msg(&format!("Opening with {}", cmd), false);
+                        }
                     }
                 }
             }
@@ -480,13 +582,248 @@ pub fn handle_openwith_custom_key(app: &mut App, key: KeyCode) {
             };
             app.input_buf.clear();
             if cmd.trim().is_empty() { return; }
-            let path_escaped = path.to_string_lossy().replace("'", "'\''");
-            let full_cmd = format!("{} '{}'", cmd.trim(), path_escaped);
-            spawn_sh_silent(&full_cmd);
-            app.msg(&format!("Opening with {}", cmd.trim()), false);
+            let cmd = cmd.trim().to_string();
+            // If the custom command matches the configured editor, use the
+            // proper terminal handoff instead of spawning silently.
+            if cmd == app.cfg.opener_editor {
+                app.msg(&format!("Opening with {}", cmd), false);
+                app.nvim_path = Some(path);
+            } else {
+                // Spawn directly so GUI apps inherit the full session env
+                let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+                let bin = parts[0];
+                let mut command = std::process::Command::new(bin);
+                if parts.len() > 1 { command.arg(parts[1]); }
+                command.arg(&path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                let _ = command.spawn();
+                app.msg(&format!("Opening with {}", cmd), false);
+            }
         }
         KeyCode::Backspace => { app.input_buf.pop(); }
         KeyCode::Char(c)   => app.input_buf.push(c),
         _ => {}
     }
+}
+
+pub fn handle_setup_key(app: &mut App, key: KeyCode) {
+    let candidates = app.setup_step.candidates();
+
+    // If typing a custom value
+    if app.setup_typing {
+        match key {
+            KeyCode::Esc => {
+                app.setup_typing = false;
+                app.setup_custom.clear();
+            }
+            KeyCode::Backspace => { app.setup_custom.pop(); }
+            KeyCode::Enter => {
+                if !app.setup_custom.trim().is_empty() {
+                    apply_setup_value(app, app.setup_custom.trim().to_string());
+                    app.setup_custom.clear();
+                    app.setup_typing = false;
+                }
+            }
+            KeyCode::Char(c) => { app.setup_custom.push(c); }
+            _ => {}
+        }
+        return;
+    }
+
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.setup_cursor > 0 { app.setup_cursor -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.setup_cursor + 1 < candidates.len() { app.setup_cursor += 1; }
+        }
+        KeyCode::BackTab | KeyCode::Left => {
+            app.setup_step   = app.setup_step.prev();
+            app.setup_cursor = 0;
+        }
+        KeyCode::Enter | KeyCode::Right => {
+            if let Some(&chosen) = candidates.get(app.setup_cursor) {
+                if chosen == "custom" {
+                    app.setup_typing = true;
+                    app.setup_custom.clear();
+                } else {
+                    apply_setup_value(app, chosen.to_string());
+                }
+            }
+        }
+        KeyCode::Esc => {
+            // Skip remaining setup and go straight to the file manager
+            finish_setup(app);
+        }
+        _ => {}
+    }
+}
+
+fn apply_setup_value(app: &mut App, value: String) {
+    match app.setup_step {
+        SetupStep::Language    => {
+            app.cfg.language = value.clone();
+            app.lang = crate::lang::load(&value);
+        }
+        SetupStep::Browser     => app.cfg.opener_browser  = value,
+        SetupStep::ImageViewer => app.cfg.opener_image    = value,
+        SetupStep::VideoPlayer => app.cfg.opener_video    = value,
+        SetupStep::AudioPlayer => app.cfg.opener_audio    = value,
+        SetupStep::DocViewer   => app.cfg.opener_doc      = value,
+        SetupStep::Editor      => app.cfg.opener_editor   = value,
+        SetupStep::Terminal    => app.cfg.opener_terminal = value,
+        SetupStep::Done        => {}
+    }
+    app.setup_step = app.setup_step.next();
+    app.setup_cursor = 0;
+
+    if app.setup_step == SetupStep::Done {
+        finish_setup(app);
+    }
+}
+
+fn finish_setup(app: &mut App) {
+    app.cfg.first_run = false;
+    let _ = app.cfg.save();
+    app.mode = InputMode::Normal;
+}
+
+// ── Keybind editor ────────────────────────────────────────────────────────────
+// Storage format:  "Up/k/Ctrl+C"
+//   /  separates independent bindings (each works alone)
+//   +  joins keys in a combo (all must be pressed together)
+
+const KEYBIND_MENU_OPTIONS: &[&str] = &[
+    "Add one key binding",
+    "Add combination  (e.g. Ctrl+K)",
+    "Remove a binding",
+    "Reset to default",
+];
+
+fn handle_keybind_menu(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => { app.mode = InputMode::Settings; }
+        KeyCode::Up   => { if app.keybind_menu_cursor > 0 { app.keybind_menu_cursor -= 1; } }
+        KeyCode::Down => {
+            if app.keybind_menu_cursor + 1 < KEYBIND_MENU_OPTIONS.len() {
+                app.keybind_menu_cursor += 1;
+            }
+        }
+        KeyCode::Enter => {
+            match app.keybind_menu_cursor {
+                0 => { // Add isolated — one keypress, appended with /
+                    app.keybind_capture_mode = 0;
+                    app.mode = InputMode::KeyCapture;
+                }
+                1 => { // Add combination — two keypresses, joined with +
+                    app.keybind_capture_mode = 1;
+                    app.keybind_combo_first.clear();
+                    app.mode = InputMode::KeyCapture;
+                }
+                2 => { // Remove — show list of current bindings to pick from
+                    let k = app.keybind_key.clone();
+                    let current = crate::config::SettingsState::get_value(&k, &app.cfg);
+                    let bindings: Vec<String> = current.split('/').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if bindings.is_empty() {
+                        app.msg("No bindings to remove", true);
+                    } else {
+                        app.keybind_remove_cursor = 0;
+                        app.mode = InputMode::KeybindRemove;
+                    }
+                }
+                3 => { // Reset to default
+                    reset_keybind_default(app);
+                    app.settings.dirty = true;
+                    app.mode = InputMode::Settings;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_key_capture(app: &mut App, key: KeyCode, mods: crossterm::event::KeyModifiers) {
+    if key == KeyCode::Esc {
+        app.mode = InputMode::KeybindMenu;
+        return;
+    }
+    let Some(captured) = crate::config::keycode_to_string(key, mods) else { return };
+
+    match app.keybind_capture_mode {
+        0 => {
+            // Add isolated binding — append with /
+            let k = app.keybind_key.clone();
+            let current = crate::config::SettingsState::get_value(&k, &app.cfg);
+            let new_val = if current.is_empty() {
+                captured.clone()
+            } else {
+                format!("{}/{}", current, captured)
+            };
+            crate::config::SettingsState::set_value(&k, &new_val, &mut app.cfg);
+            app.settings.dirty = true;
+            app.msg(&format!("Added: {}", captured), false);
+            app.mode = InputMode::Settings;
+        }
+        1 => {
+            // Combo step 1 — capture first key
+            app.keybind_combo_first = captured;
+            app.keybind_capture_mode = 2; // wait for second key
+        }
+        2 => {
+            // Combo step 2 — combine with + and append with /
+            let combo = format!("{}+{}", app.keybind_combo_first, captured);
+            let k = app.keybind_key.clone();
+            let current = crate::config::SettingsState::get_value(&k, &app.cfg);
+            let new_val = if current.is_empty() {
+                combo.clone()
+            } else {
+                format!("{}/{}", current, combo)
+            };
+            crate::config::SettingsState::set_value(&k, &new_val, &mut app.cfg);
+            app.settings.dirty = true;
+            app.msg(&format!("Added combo: {}", combo), false);
+            app.mode = InputMode::Settings;
+        }
+        _ => {}
+    }
+}
+
+pub fn handle_keybind_remove(app: &mut App, key: KeyCode) {
+    let k = app.keybind_key.clone();
+    let current = crate::config::SettingsState::get_value(&k, &app.cfg);
+    let bindings: Vec<String> = current.split('/').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+    match key {
+        KeyCode::Esc => { app.mode = InputMode::KeybindMenu; }
+        KeyCode::Up   => { if app.keybind_remove_cursor > 0 { app.keybind_remove_cursor -= 1; } }
+        KeyCode::Down => {
+            if app.keybind_remove_cursor + 1 < bindings.len() { app.keybind_remove_cursor += 1; }
+        }
+        KeyCode::Enter => {
+            if app.keybind_remove_cursor < bindings.len() {
+                let removed = bindings[app.keybind_remove_cursor].clone();
+                let new_bindings: Vec<&String> = bindings.iter().enumerate()
+                    .filter(|(i, _)| *i != app.keybind_remove_cursor)
+                    .map(|(_, b)| b)
+                    .collect();
+                let new_val = new_bindings.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("/");
+                crate::config::SettingsState::set_value(&k, &new_val, &mut app.cfg);
+                app.settings.dirty = true;
+                app.msg(&format!("Removed: {}", removed), false);
+                app.mode = InputMode::Settings;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reset_keybind_default(app: &mut App) {
+    let default_cfg = crate::config::Config::default();
+    let k = app.keybind_key.as_str();
+    let default_val = crate::config::SettingsState::get_value(k, &default_cfg);
+    crate::config::SettingsState::set_value(k, &default_val, &mut app.cfg);
+    app.msg(&format!("Reset to default: {}", default_val), false);
 }

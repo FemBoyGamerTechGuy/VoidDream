@@ -325,6 +325,18 @@ pub struct DeleteProgress {
     pub start_time:   Instant,
 }
 
+// ─── TrashProgress ────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct TrashProgress {
+    pub current_file: String,
+    pub files_done:   u64,
+    pub files_total:  u64,
+    pub done:         bool,
+    pub error:        Option<String>,
+    pub start_time:   Instant,
+}
+
 // ─── InputMode ────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq)]
@@ -340,8 +352,98 @@ pub enum InputMode {
     Extracting,
     Copying,
     Deleting,
+    Trashing,
+    TrashBrowser,
+    FirstRunSetup,
+    /// Keybind management overlay (Add isolated / Add combo / Remove / Reset)
+    KeybindMenu,
+    /// Waiting for a keypress to capture (isolated or combo step)
+    KeyCapture,
+    /// Showing list of current bindings to pick one to remove
+    KeybindRemove,
     RunArgs(PathBuf, bool, String, String), // (path, focus_on_end, start_args, end_args)
     OpenWith(PathBuf, Vec<(String, String)>, usize), // (path, [(label, cmd)], cursor)
     OpenWithCustom(PathBuf),
     DriveManager,
+}
+
+// ─── FirstRunSetup state ──────────────────────────────────────────────────────
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum SetupStep {
+    Language,
+    Browser,
+    ImageViewer,
+    VideoPlayer,
+    AudioPlayer,
+    DocViewer,
+    Editor,
+    Terminal,
+    Done,
+}
+
+impl SetupStep {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Language    => Self::Browser,
+            Self::Browser     => Self::ImageViewer,
+            Self::ImageViewer => Self::VideoPlayer,
+            Self::VideoPlayer => Self::AudioPlayer,
+            Self::AudioPlayer => Self::DocViewer,
+            Self::DocViewer   => Self::Editor,
+            Self::Editor      => Self::Terminal,
+            Self::Terminal    => Self::Done,
+            Self::Done        => Self::Done,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Language    => Self::Language,
+            Self::Browser     => Self::Language,
+            Self::ImageViewer => Self::Browser,
+            Self::VideoPlayer => Self::ImageViewer,
+            Self::AudioPlayer => Self::VideoPlayer,
+            Self::DocViewer   => Self::AudioPlayer,
+            Self::Editor      => Self::DocViewer,
+            Self::Terminal    => Self::Editor,
+            Self::Done        => Self::Terminal,
+        }
+    }
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Language    => "Language",
+            Self::Browser     => "Web Browser",
+            Self::ImageViewer => "Image Viewer",
+            Self::VideoPlayer => "Video Player",
+            Self::AudioPlayer => "Audio Player",
+            Self::DocViewer   => "Document Viewer",
+            Self::Editor      => "Text Editor",
+            Self::Terminal    => "Terminal",
+            Self::Done        => "Done",
+        }
+    }
+    pub fn candidates(self) -> &'static [&'static str] {
+        match self {
+            Self::Language    => &["English (UK)", "Română", "Français", "Deutsch",
+                                   "Español", "Italiano", "Português", "Русский",
+                                   "日本語", "中文", "한국어", "العربية"],
+            Self::Browser     => &["firefox", "librewolf", "zen-browser", "floorp",
+                                   "chromium", "google-chrome-stable",
+                                   "microsoft-edge-stable", "brave", "vivaldi",
+                                   "opera", "xdg-open", "custom"],
+            Self::ImageViewer => &["mirage", "feh", "nsxiv", "eog", "gwenview",
+                                   "imv", "gimp", "xdg-open", "custom"],
+            Self::VideoPlayer => &["mpv", "vlc", "celluloid", "totem",
+                                   "xdg-open", "custom"],
+            Self::AudioPlayer => &["mpv", "vlc", "rhythmbox", "audacious",
+                                   "xdg-open", "custom"],
+            Self::DocViewer   => &["libreoffice", "okular", "evince", "zathura",
+                                   "xdg-open", "custom"],
+            Self::Editor      => &["nvim", "vim", "nano", "helix", "emacs",
+                                   "micro", "custom"],
+            Self::Terminal    => &["kitty", "alacritty", "foot", "wezterm",
+                                   "gnome-terminal", "konsole", "xterm", "custom"],
+            Self::Done        => &[],
+        }
+    }
 }

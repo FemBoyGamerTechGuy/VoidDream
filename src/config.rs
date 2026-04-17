@@ -575,24 +575,144 @@ pub struct Config {
     pub opener_editor:     String,
     pub opener_jar:        String,
     pub opener_terminal:   String,
-    pub key_copy:          String,
-    pub key_cut:           String,
-    pub key_paste:         String,
-    pub key_delete:        String,
-    pub key_rename:        String,
-    pub key_new_file:      String,
-    pub key_new_dir:       String,
-    pub key_search:        String,
-    pub key_toggle_hidden: String,
-    pub key_quit:          String,
-    pub key_new_tab:       String,
-    pub key_close_tab:     String,
-    pub key_cycle_tab:     String,
-    pub key_select:        String,
-    pub key_select_all:    String,
+    pub key_copy:              String,
+    pub key_cut:               String,
+    pub key_paste:             String,
+    pub key_delete:            String,
+    pub key_trash:             String,
+    pub key_rename:            String,
+    pub key_new_file:          String,
+    pub key_new_dir:           String,
+    pub key_search:            String,
+    pub key_toggle_hidden:     String,
+    pub key_quit:              String,
+    pub key_new_tab:           String,
+    pub key_close_tab:         String,
+    pub key_cycle_tab:         String,
+    pub key_select:            String,
+    pub key_select_all:        String,
+    pub key_select_all_alt:    String,
+    pub key_deselect:          String,
+    pub key_open_with:         String,
+    pub key_settings:          String,
+    pub key_help:              String,
+    pub key_drives:            String,
+    pub key_drive_mount:       String,
+    pub key_drive_unmount:     String,
+    pub key_drive_refresh:     String,
+    pub key_trash_browser:     String,
+    pub key_nav_up:            String,
+    pub key_nav_down:          String,
+    pub key_nav_left:          String,
+    pub key_nav_right:         String,
+    pub key_page_up:           String,
+    pub key_page_down:         String,
+    pub key_first:             String,
+    pub key_last:              String,
     pub show_clock:        bool,
     pub show_file_mtime:   bool,
     pub language:          String,
+    #[serde(default = "default_true")]
+    pub first_run:         bool,
+}
+
+fn default_true() -> bool { true }
+
+/// Check if a pressed key matches any binding in a slash-separated list.
+/// Format: "Up/k/Ctrl+C"  — slash separates independent bindings, + joins combo keys.
+pub fn key_matches(stored: &str, key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> bool {
+    for binding in stored.split('/') {
+        let binding = binding.trim();
+        if binding.is_empty() { continue; }
+        if binding_matches(binding, key, mods) { return true; }
+    }
+    false
+}
+
+/// Parse a binding string like "Ctrl+C" or "Up" into (modifier, keycode) and check.
+fn binding_matches(b: &str, key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> bool {
+    use crossterm::event::KeyModifiers;
+    // Handle combos like Ctrl+C, Ctrl+Up etc — split on + but not inside words
+    let parts: Vec<&str> = b.split('+').collect();
+    if parts.len() >= 2 {
+        // Combo — last part is the key, preceding parts are modifiers
+        let key_part = parts[parts.len() - 1].trim();
+        let mut required_mods = KeyModifiers::NONE;
+        for mod_part in &parts[..parts.len()-1] {
+            match mod_part.trim().to_lowercase().as_str() {
+                "ctrl" => required_mods |= KeyModifiers::CONTROL,
+                "shift"=> required_mods |= KeyModifiers::SHIFT,
+                "alt"  => required_mods |= KeyModifiers::ALT,
+                _ => {}
+            }
+        }
+        if !mods.contains(required_mods) { return false; }
+        return single_key_matches(key_part, key);
+    }
+    // Single key — no modifiers required (unless it's a Ctrl+x style single token)
+    single_key_matches(b, key)
+}
+
+fn single_key_matches(b: &str, key: crossterm::event::KeyCode) -> bool {
+    use crossterm::event::KeyCode;
+    match b {
+        "Up"        => key == KeyCode::Up,
+        "Down"      => key == KeyCode::Down,
+        "Left"      => key == KeyCode::Left,
+        "Right"     => key == KeyCode::Right,
+        "Enter"     => key == KeyCode::Enter,
+        "Esc"       => key == KeyCode::Esc,
+        "Tab"       => key == KeyCode::Tab,
+        "Backspace" => key == KeyCode::Backspace,
+        "Delete"    => key == KeyCode::Delete,
+        "Home"      => key == KeyCode::Home,
+        "End"       => key == KeyCode::End,
+        "PageUp"    => key == KeyCode::PageUp,
+        "PageDown"  => key == KeyCode::PageDown,
+        "Space"     => key == KeyCode::Char(' '),
+        s if s.len() == 1 => s.chars().next().map(|c| key == KeyCode::Char(c)).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Convert a raw keypress into a canonical string for storage.
+/// Convert a keypress into a canonical binding string for storage.
+/// Returns None for keys we never want to capture (Esc).
+pub fn keycode_to_string(key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Option<String> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    // Ctrl+i is sent as Tab by terminals — ignore
+    if mods.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key {
+            if c == 'i' { return None; }
+            return Some(format!("Ctrl+{}", c.to_ascii_uppercase()));
+        }
+        // Ctrl+arrow etc
+        match key {
+            KeyCode::Up    => return Some("Ctrl+Up".into()),
+            KeyCode::Down  => return Some("Ctrl+Down".into()),
+            KeyCode::Left  => return Some("Ctrl+Left".into()),
+            KeyCode::Right => return Some("Ctrl+Right".into()),
+            _ => {}
+        }
+    }
+    match key {
+        KeyCode::Char(' ') => Some("Space".into()),
+        KeyCode::Char(c)   => Some(c.to_string()),
+        KeyCode::Up        => Some("Up".into()),
+        KeyCode::Down      => Some("Down".into()),
+        KeyCode::Left      => Some("Left".into()),
+        KeyCode::Right     => Some("Right".into()),
+        KeyCode::Enter     => Some("Enter".into()),
+        KeyCode::Tab       => Some("Tab".into()),
+        KeyCode::Backspace => Some("Backspace".into()),
+        KeyCode::Delete    => Some("Delete".into()),
+        KeyCode::Home      => Some("Home".into()),
+        KeyCode::End       => Some("End".into()),
+        KeyCode::PageUp    => Some("PageUp".into()),
+        KeyCode::PageDown  => Some("PageDown".into()),
+        KeyCode::Esc       => None, // always cancel
+        _                  => None,
+    }
 }
 
 impl Default for Config {
@@ -608,15 +728,34 @@ impl Default for Config {
             opener_jar: "java -jar".into(),
             opener_terminal: "kitty".into(),
             key_copy: "c".into(), key_cut: "u".into(), key_paste: "p".into(),
-            key_delete: "d".into(), key_rename: "r".into(),
+            key_delete: "d".into(), key_trash: "T".into(), key_rename: "r".into(),
             key_new_file: "f".into(), key_new_dir: "m".into(),
             key_search: "/".into(), key_toggle_hidden: ".".into(),
             key_quit: "q".into(), key_new_tab: "t".into(),
             key_close_tab: "x".into(), key_cycle_tab: "Tab".into(),
             key_select: "Space".into(), key_select_all: "Ctrl+a".into(),
+            key_select_all_alt: "A".into(),
+            key_deselect: "Ctrl+r".into(),
+            key_open_with: "k".into(),
+            key_settings: ":".into(),
+            key_help: "?".into(),
+            key_drives: "D".into(),
+            key_drive_mount:   "m".into(),
+            key_drive_unmount: "u".into(),
+            key_drive_refresh: "r".into(),
+            key_trash_browser: "B".into(),
+            key_nav_up:    "Up".into(),
+            key_nav_down:  "Down".into(),
+            key_nav_left:  "Left/Backspace".into(),
+            key_nav_right: "Right/Enter".into(),
+            key_page_up:   "PageUp".into(),
+            key_page_down: "PageDown".into(),
+            key_first:     "Home".into(),
+            key_last:      "End".into(),
             show_clock: true,
             show_file_mtime: true,
             language: "English (UK)".into(),
+            first_run: true,
         }
     }
 }
@@ -634,8 +773,9 @@ impl Config {
 
     /// Detect the best available browser on the system.
     pub fn detect_browser() -> String {
-        let candidates = ["xdg-open", "librewolf", "firefox", "zen-browser",
-                          "chromium", "google-chrome-stable", "microsoft-edge-stable"];
+        let candidates = ["librewolf", "firefox", "zen-browser", "floorp",
+                          "chromium", "google-chrome-stable", "microsoft-edge-stable",
+                          "brave", "vivaldi", "opera"];
         for b in candidates {
             if Command::new("which").arg(b)
                 .output().map(|o| o.status.success()).unwrap_or(false)
@@ -643,11 +783,9 @@ impl Config {
                 return b.to_string();
             }
         }
+        // Last resort — xdg-open delegates to the system default
         "xdg-open".to_string()
     }
-
-
-    /// Detect the best available browser on the system.
 
 
 
@@ -719,38 +857,52 @@ impl SettingsState {
                 ("fixed_arc_7z",   "Archive .7z"),
             ],
             SettingsSection::Keybinds   => vec![
-                // Configurable
-                ("key_select",       "Select / deselect"),
-                ("key_select_all",   "Select all"),
-                ("key_copy",         "Copy"),
-                ("key_cut",          "Cut"),
-                ("key_paste",        "Paste"),
-                ("key_delete",       "Delete"),
-                ("key_rename",       "Rename"),
-                ("key_new_file",     "New file"),
-                ("key_new_dir",      "New directory"),
-                ("key_search",       "Fuzzy search"),
-                ("key_toggle_hidden","Toggle hidden files"),
-                ("key_new_tab",      "New tab"),
-                ("key_close_tab",    "Close tab"),
-                ("fixed_drives",     "Drive / USB / phone manager  [D]"),
-                ("fixed_drive_m",    "  Mount selected device  [m]"),
-                ("fixed_drive_u",    "  Unmount selected device  [u]"),
-                ("fixed_drive_r",    "  Refresh device list  [r]"),
-                ("key_cycle_tab",    "Cycle tabs"),
-                ("key_quit",         "Quit"),
-                // Fixed (not configurable)
-                ("fixed_nav",        "Navigate"),
-                ("fixed_open",       "Open / enter dir"),
-                ("fixed_up",         "Go up"),
-                ("fixed_pgupdown",   "Jump 10 entries"),
-                ("fixed_homeend",    "First / last entry"),
-                ("fixed_deselect",   "Deselect all"),
-                ("fixed_sel_all2",   "Select all (alt)"),
-                ("fixed_open_with",  "Open with…"),
-                ("fixed_settings",   "Open settings"),
-                ("fixed_help",       "Show help"),
-                ("fixed_quit2",      "Quit (alt)"),
+                // ── Navigation
+                ("fixed_header_nav",    "nav"),
+                ("key_nav_up",          "Move up"),
+                ("key_nav_down",        "Move down"),
+                ("key_nav_left",        "Go up / back"),
+                ("key_nav_right",       "Open / enter"),
+                ("key_page_up",         "Jump up 10"),
+                ("key_page_down",       "Jump down 10"),
+                ("key_first",           "First entry"),
+                ("key_last",            "Last entry"),
+                // ── Selection
+                ("fixed_header_sel",    "sel"),
+                ("key_select",          "Select / deselect"),
+                ("key_select_all",      "Select all"),
+                ("key_select_all_alt",  "Select all (alt)"),
+                ("key_deselect",        "Deselect all"),
+                // ── File operations
+                ("fixed_header_ops",    "ops"),
+                ("key_copy",            "Copy"),
+                ("key_cut",             "Cut"),
+                ("key_paste",           "Paste"),
+                ("key_delete",          "Delete permanently"),
+                ("key_trash",           "Move to trash"),
+                ("key_trash_browser",   "Open trash browser"),
+                ("key_rename",          "Rename"),
+                ("key_new_file",        "New file"),
+                ("key_new_dir",         "New directory"),
+                ("key_open_with",       "Open with…"),
+                ("key_search",          "Fuzzy search"),
+                ("key_toggle_hidden",   "Toggle hidden files"),
+                // ── Tabs
+                ("fixed_header_tabs",   "tabs"),
+                ("key_new_tab",         "New tab"),
+                ("key_close_tab",       "Close tab"),
+                ("key_cycle_tab",       "Cycle tabs"),
+                // ── Drives & Devices
+                ("fixed_header_drives", "drives"),
+                ("key_drives",          "Open drive manager"),
+                ("key_drive_mount",     "  Mount selected device"),
+                ("key_drive_unmount",   "  Unmount selected device"),
+                ("key_drive_refresh",   "  Refresh device list"),
+                // ── App
+                ("fixed_header_app",    "app"),
+                ("key_settings",        "Open settings"),
+                ("key_help",            "Show help"),
+                ("key_quit",            "Quit"),
             ],
             SettingsSection::About => vec![
                 ("fixed_about_app",     "Application"),
@@ -799,21 +951,36 @@ impl SettingsState {
             "key_cut"           => cfg.key_cut.clone(),
             "key_paste"         => cfg.key_paste.clone(),
             "key_delete"        => cfg.key_delete.clone(),
+            "key_trash"         => cfg.key_trash.clone(),
             "key_rename"        => cfg.key_rename.clone(),
             "key_new_file"      => cfg.key_new_file.clone(),
             "key_new_dir"       => cfg.key_new_dir.clone(),
             "key_search"        => cfg.key_search.clone(),
             "key_toggle_hidden" => cfg.key_toggle_hidden.clone(),
             "key_quit"          => cfg.key_quit.clone(),
-            "fixed_drives"      => "D".into(),
-            "fixed_drive_m"     => "m".into(),
-            "fixed_drive_u"     => "u".into(),
-            "fixed_drive_r"     => "r".into(),
             "key_new_tab"       => cfg.key_new_tab.clone(),
             "key_close_tab"     => cfg.key_close_tab.clone(),
             "key_cycle_tab"     => cfg.key_cycle_tab.clone(),
             "key_select"        => cfg.key_select.clone(),
             "key_select_all"    => cfg.key_select_all.clone(),
+            "key_select_all_alt"=> cfg.key_select_all_alt.clone(),
+            "key_deselect"      => cfg.key_deselect.clone(),
+            "key_open_with"     => cfg.key_open_with.clone(),
+            "key_settings"      => cfg.key_settings.clone(),
+            "key_help"          => cfg.key_help.clone(),
+            "key_drives"        => cfg.key_drives.clone(),
+            "key_drive_mount"   => cfg.key_drive_mount.clone(),
+            "key_drive_unmount" => cfg.key_drive_unmount.clone(),
+            "key_drive_refresh" => cfg.key_drive_refresh.clone(),
+            "key_trash_browser" => cfg.key_trash_browser.clone(),
+            "key_nav_up"        => cfg.key_nav_up.clone(),
+            "key_nav_down"      => cfg.key_nav_down.clone(),
+            "key_nav_left"      => cfg.key_nav_left.clone(),
+            "key_nav_right"     => cfg.key_nav_right.clone(),
+            "key_page_up"       => cfg.key_page_up.clone(),
+            "key_page_down"     => cfg.key_page_down.clone(),
+            "key_first"         => cfg.key_first.clone(),
+            "key_last"          => cfg.key_last.clone(),
             "fixed_arc_rar"   => "unrar (system)".into(),
             "fixed_arc_zip"   => "native Rust".into(),
             "fixed_arc_tgz"   => "native Rust".into(),
@@ -831,14 +998,8 @@ impl SettingsState {
             "fixed_up"         => "\u{2190} / Backspace  (fixed)".into(),
             "fixed_pgupdown"   => "Page Up / Page Down  (fixed)".into(),
             "fixed_homeend"    => "Home / End  (fixed)".into(),
-            "fixed_deselect"   => "Ctrl+r  (fixed)".into(),
-            "fixed_sel_all2"   => "A  (fixed)".into(),
-            "fixed_open_with"  => "k  (fixed)".into(),
-            "fixed_settings"   => ":  (fixed)".into(),
-            "fixed_help"       => "?  (fixed)".into(),
-            "fixed_quit2"      => "Esc  (fixed)".into(),
             "fixed_about_app"     => "VoidDream".into(),
-            "fixed_about_ver"     => "0.1.7".into(),
+            "fixed_about_ver"     => "0.1.8".into(),
             "fixed_about_author"  => "FemBoyGamerTechGuy".into(),
             "fixed_about_license" => "VoidDream Proprietary License v1.0".into(),
             "fixed_about_repo"    => "github.com/FemBoyGamerTechGuy/VoidDream".into(),
@@ -868,6 +1029,7 @@ impl SettingsState {
             "key_cut"           => cfg.key_cut           = val.into(),
             "key_paste"         => cfg.key_paste         = val.into(),
             "key_delete"        => cfg.key_delete        = val.into(),
+            "key_trash"         => cfg.key_trash          = val.into(),
             "key_rename"        => cfg.key_rename        = val.into(),
             "key_new_file"      => cfg.key_new_file      = val.into(),
             "key_new_dir"       => cfg.key_new_dir       = val.into(),
@@ -879,6 +1041,24 @@ impl SettingsState {
             "key_cycle_tab"     => cfg.key_cycle_tab     = val.into(),
             "key_select"        => cfg.key_select        = val.into(),
             "key_select_all"    => cfg.key_select_all    = val.into(),
+            "key_select_all_alt"=> cfg.key_select_all_alt = val.into(),
+            "key_deselect"      => cfg.key_deselect      = val.into(),
+            "key_open_with"     => cfg.key_open_with     = val.into(),
+            "key_settings"      => cfg.key_settings      = val.into(),
+            "key_help"          => cfg.key_help          = val.into(),
+            "key_drives"        => cfg.key_drives        = val.into(),
+            "key_drive_mount"   => cfg.key_drive_mount   = val.into(),
+            "key_drive_unmount" => cfg.key_drive_unmount = val.into(),
+            "key_drive_refresh" => cfg.key_drive_refresh = val.into(),
+            "key_trash_browser" => cfg.key_trash_browser = val.into(),
+            "key_nav_up"        => cfg.key_nav_up        = val.into(),
+            "key_nav_down"      => cfg.key_nav_down      = val.into(),
+            "key_nav_left"      => cfg.key_nav_left      = val.into(),
+            "key_nav_right"     => cfg.key_nav_right     = val.into(),
+            "key_page_up"       => cfg.key_page_up       = val.into(),
+            "key_page_down"     => cfg.key_page_down     = val.into(),
+            "key_first"         => cfg.key_first         = val.into(),
+            "key_last"          => cfg.key_last          = val.into(),
             _ => {}
         }
     }

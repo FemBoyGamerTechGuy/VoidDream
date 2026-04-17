@@ -43,6 +43,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         InputMode::Extracting => draw_extract_overlay(f, app, sz),
         InputMode::Copying    => draw_copy_overlay(f, app, sz),
         InputMode::Deleting   => draw_delete_overlay(f, app, sz),
+        InputMode::Trashing   => draw_trash_overlay(f, app, sz),
+        InputMode::TrashBrowser => draw_trash_browser(f, app, sz),
+        InputMode::FirstRunSetup => draw_setup_overlay(f, app, sz),
+        InputMode::KeybindMenu => draw_keybind_menu(f, app, sz),
+        InputMode::KeyCapture  => draw_key_capture(f, app, sz),
+        InputMode::KeybindRemove => draw_keybind_remove(f, app, sz),
         InputMode::RunArgs(..) => draw_runargs_overlay(f, app, sz),
         InputMode::OpenWith(..) => draw_openwith_overlay(f, app, sz),
         InputMode::OpenWithCustom(..) => draw_openwith_custom_overlay(f, app, sz),
@@ -535,6 +541,365 @@ fn draw_help_bar(f: &mut Frame, app: &App, rect: Rect) {
         Span::styled(":help ", st(app.theme.fg_muted)),
     ])).style(st_bg(app.theme.fg_muted, app.theme.bg_primary));
     f.render_widget(bar, rect);
+}
+
+fn draw_trash_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 2 / 3).max(52).min(rect.width);
+    let oh = 9u16;
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let prog = match &app.trash_progress { Some(p) => p.clone(), None => return };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.warn))
+        .title(Span::styled(
+            format!("  \u{f1f8}  Moving to Trash  \u{2014}  {} item(s)  \u{2014}  Esc to cancel  ", prog.files_total),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let bar_w  = rows[1].width as usize;
+    let (pct, filled) = if prog.files_total > 0 {
+        let p = (prog.files_done * 100 / prog.files_total).min(100);
+        let f = (prog.files_done * bar_w as u64 / prog.files_total).min(bar_w as u64) as usize;
+        (p, f)
+    } else { (0, 0) };
+
+    let filled_str: String = app.icons.chrome.progress_fill.repeat(filled);
+    let empty_str:  String = std::iter::repeat('\u{2591}').take(bar_w.saturating_sub(filled)).collect();
+    f.render_widget(Paragraph::new(Line::from(vec![
+        Span::styled(filled_str, bold(app.theme.warn)),
+        Span::styled(empty_str,  st(app.theme.bg_popup)),
+    ])), rows[1]);
+
+    let current_num = if prog.done { prog.files_total } else { prog.files_done + 1 }.min(prog.files_total);
+    f.render_widget(Paragraph::new(Span::styled(
+        format!("  {}%   Item {} of {}", pct, current_num, prog.files_total),
+        st(app.theme.fg_dim),
+    )), rows[2]);
+
+    let max_name = rows[3].width.saturating_sub(4) as usize;
+    let display  = if prog.current_file.len() > max_name && max_name > 3 {
+        format!("  \u{2026}{}", &prog.current_file[prog.current_file.len() - max_name + 1..])
+    } else { format!("  {}", prog.current_file) };
+    f.render_widget(Paragraph::new(Span::styled(display, st(app.theme.fg_muted))), rows[3]);
+}
+
+fn draw_trash_browser(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 3 / 4).max(60).min(rect.width);
+    let oh = (rect.height * 3 / 4).max(12).min(rect.height);
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let count = app.trash_entries.len();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  \u{f1f8}  Trash  \u{2014}  {} item(s)  \u{2014}  r:restore  d:delete  D:empty  q:close  ", count),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    if app.trash_entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  Trash is empty", st(app.theme.fg_muted))),
+            inner,
+        );
+        return;
+    }
+
+    // Header row + list
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    f.render_widget(Paragraph::new(Span::styled(
+        format!("  {:<40}  {}", "Original path", "Deleted"),
+        bold(app.theme.fg_dim),
+    )), rows[0]);
+
+    let items: Vec<ListItem> = app.trash_entries.iter().enumerate().map(|(i, e)| {
+        let is_cur = i == app.trash_cursor;
+        let style  = if is_cur {
+            bold_bg(app.theme.fg_cursor, app.theme.bg_cursor)
+        } else {
+            st(app.theme.fg_primary)
+        };
+        let icon = if e.is_dir { "\u{f07b}" } else { "\u{f15b}" };
+        let orig = e.original_path.display().to_string();
+        let max_path = (rows[1].width as usize).saturating_sub(24);
+        let display_path = if orig.len() > max_path && max_path > 3 {
+            format!("\u{2026}{}", &orig[orig.len() - max_path + 1..])
+        } else { orig };
+        ListItem::new(Span::styled(
+            format!("  {} {:<40}  {}", icon, display_path, &e.deletion_date[..16.min(e.deletion_date.len())]),
+            style,
+        ))
+    }).collect();
+
+    let mut state = ListState::default();
+    state.select(Some(app.trash_cursor));
+    f.render_stateful_widget(
+        List::new(items).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)),
+        rows[1],
+        &mut state,
+    );
+}
+
+
+fn draw_keybind_menu(f: &mut Frame, app: &App, rect: Rect) {
+    let l = app.lang;
+    let options = [
+        l.kb_edit_add_one,
+        l.kb_edit_add_combo,
+        l.kb_edit_remove,
+        l.kb_edit_reset,
+    ];
+    let current = crate::config::SettingsState::get_value(&app.keybind_key, &app.cfg);
+    let cur_display = if current.is_empty() {
+        "(none)".into()
+    } else {
+        current.split('/').map(|s| s.trim()).collect::<Vec<_>>().join("  /  ")
+    };
+    let ow = 58u16.min(rect.width);
+    let oh = (options.len() as u16 + 7).min(rect.height);
+    let popup = Rect {
+        x: (rect.width.saturating_sub(ow)) / 2,
+        y: (rect.height.saturating_sub(oh)) / 2,
+        width: ow, height: oh,
+    };
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  \u{f11c}  {}  ", app.keybind_label),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    f.render_widget(Paragraph::new(Span::styled(
+        format!("  {}: {}", l.kb_edit_current, cur_display), st(app.theme.fg_muted),
+    )), rows[0]);
+    let items: Vec<ListItem> = options.iter().enumerate().map(|(i, o)| {
+        let s = if i == app.keybind_menu_cursor {
+            bold_bg(app.theme.fg_cursor, app.theme.bg_cursor)
+        } else { st(app.theme.fg_primary) };
+        ListItem::new(Span::styled(format!("  {}", o), s))
+    }).collect();
+    let mut state = ListState::default();
+    state.select(Some(app.keybind_menu_cursor));
+    f.render_stateful_widget(
+        List::new(items).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)),
+        rows[2], &mut state,
+    );
+    f.render_widget(Paragraph::new(Span::styled(
+        "  \u{2191}\u{2193} navigate   Enter select   Esc cancel",
+        st(app.theme.fg_muted),
+    )), rows[3]);
+}
+
+fn draw_key_capture(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = 58u16.min(rect.width);
+    let oh = 9u16.min(rect.height);
+    let popup = Rect {
+        x: (rect.width.saturating_sub(ow)) / 2,
+        y: (rect.height.saturating_sub(oh)) / 2,
+        width: ow, height: oh,
+    };
+    f.render_widget(Clear, popup);
+    let l = app.lang;
+    let (mode_str, step_line) = match app.keybind_capture_mode {
+        0 => (l.kb_edit_add_one, format!("  {}", l.kb_edit_press_key)),
+        1 => (l.kb_edit_add_combo, format!("  {}", l.kb_edit_step1)),
+        2 => (l.kb_edit_add_combo, format!("  {}", l.kb_edit_step2.replace("{}", &app.keybind_combo_first))),
+        _ => ("", String::new()),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  \u{f11c}  {}  \u{2014}  {}  ", app.keybind_label, mode_str),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    f.render_widget(Paragraph::new(vec![
+        Line::from(""),
+        Line::from(Span::styled(step_line, bold(app.theme.fg_primary))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Supports: letters, Ctrl+key, arrows,",
+            st(app.theme.fg_dim),
+        )),
+        Line::from(Span::styled(
+            "  Enter, Tab, Space, PageUp/Down, Home/End",
+            st(app.theme.fg_dim),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("  Esc  cancel", st(app.theme.fg_muted))),
+    ]), inner);
+}
+
+fn draw_keybind_remove(f: &mut Frame, app: &App, rect: Rect) {
+    let l = app.lang;
+    let current = crate::config::SettingsState::get_value(&app.keybind_key, &app.cfg);
+    let bindings: Vec<&str> = current.split('/')
+        .map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let ow = 50u16.min(rect.width);
+    let oh = (bindings.len() as u16 + 6).max(8).min(rect.height);
+    let popup = Rect {
+        x: (rect.width.saturating_sub(ow)) / 2,
+        y: (rect.height.saturating_sub(oh)) / 2,
+        width: ow, height: oh,
+    };
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.warn))
+        .title(Span::styled(
+            format!("  {}  \u{2014}  {}  ", l.kb_edit_remove_title, app.keybind_label),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    let items: Vec<ListItem> = bindings.iter().enumerate().map(|(i, b)| {
+        let s = if i == app.keybind_remove_cursor {
+            bold_bg(app.theme.fg_cursor, app.theme.bg_cursor)
+        } else { st(app.theme.fg_primary) };
+        ListItem::new(Span::styled(format!("  {}", b), s))
+    }).collect();
+    let mut state = ListState::default();
+    state.select(Some(app.keybind_remove_cursor));
+    f.render_stateful_widget(
+        List::new(items).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)),
+        rows[0], &mut state,
+    );
+    f.render_widget(Paragraph::new(Span::styled(
+        "  Enter remove   Esc cancel", st(app.theme.fg_muted),
+    )), rows[1]);
+}
+
+fn draw_setup_overlay(f: &mut Frame, app: &App, rect: Rect) {
+    let ow = (rect.width * 2 / 3).max(55).min(rect.width);
+    let oh = (rect.height * 2 / 3).max(20).min(rect.height);
+    let ox = (rect.width.saturating_sub(ow)) / 2;
+    let oy = (rect.height.saturating_sub(oh)) / 2;
+    let popup = Rect { x: ox, y: oy, width: ow, height: oh };
+    f.render_widget(Clear, popup);
+
+    let step  = app.setup_step;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(bold(app.theme.accent))
+        .title(Span::styled(
+            format!("  \u{f085}  VoidDream Setup  \u{2014}  {}  ", step.title()),
+            bold_bg(app.theme.fg_dim, app.theme.bg_primary),
+        ))
+        .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // hint / typing line
+            Constraint::Min(0),    // candidate list
+            Constraint::Length(1), // step progress bar
+        ])
+        .split(inner);
+
+    // ── Hint / custom input line ──────────────────────────────────────────────
+    let hint = if app.setup_typing {
+        format!("  Type command: {}\u{2588}", app.setup_custom)
+    } else {
+        "  \u{2191}\u{2193} select   Enter confirm   \u{21e6} back   Esc skip setup".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, st(app.theme.fg_muted))),
+        rows[0],
+    );
+
+    // ── Candidate list ────────────────────────────────────────────────────────
+    let candidates = step.candidates();
+    let items: Vec<ListItem> = candidates.iter().enumerate().map(|(i, &c)| {
+        let is_cur = i == app.setup_cursor;
+        let style  = if is_cur {
+            bold_bg(app.theme.fg_cursor, app.theme.bg_cursor)
+        } else {
+            st(app.theme.fg_primary)
+        };
+        ListItem::new(Span::styled(format!("  {}", c), style))
+    }).collect();
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.setup_cursor));
+    f.render_stateful_widget(
+        List::new(items).style(st_bg(app.theme.fg_primary, app.theme.bg_primary)),
+        rows[1],
+        &mut list_state,
+    );
+
+    // ── Step progress dots ────────────────────────────────────────────────────
+    let step_names = ["Lang","Browser","Image","Video","Audio","Doc","Editor","Term"];
+    let current_idx = match step {
+        SetupStep::Language    => 0usize,
+        SetupStep::Browser     => 1,
+        SetupStep::ImageViewer => 2,
+        SetupStep::VideoPlayer => 3,
+        SetupStep::AudioPlayer => 4,
+        SetupStep::DocViewer   => 5,
+        SetupStep::Editor      => 6,
+        SetupStep::Terminal    => 7,
+        SetupStep::Done        => 8,
+    };
+    let progress: String = step_names.iter().enumerate().map(|(i, s)| {
+        if i == current_idx { format!(" [\u{25cf}{}] ", s) }
+        else if i < current_idx { format!(" [\u{2713}{}] ", s) }
+        else { format!(" [ {}] ", s) }
+    }).collect::<Vec<_>>().join("");
+    f.render_widget(
+        Paragraph::new(Span::styled(progress, st(app.theme.fg_muted))),
+        rows[2],
+    );
 }
 
 fn draw_extract_overlay(f: &mut Frame, app: &App, rect: Rect) {
@@ -1176,7 +1541,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             Line::from(vec![]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_ver),     st(muted)),
-                Span::styled("0.1.7", bold(fg)),
+                Span::styled("0.1.8", bold(fg)),
             ]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_author),  st(muted)),
@@ -1212,37 +1577,46 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             "date_format"       => l.set_date_format,
             "show_clock"        => l.set_show_clock,
             "show_file_mtime"   => l.set_show_mtime,
+            "key_nav_up"        => l.kb_nav_up,
+            "key_nav_down"      => l.kb_nav_down,
+            "key_nav_left"      => l.kb_nav_left,
+            "key_nav_right"     => l.kb_nav_right,
+            "key_page_up"       => l.kb_page_up,
+            "key_page_down"     => l.kb_page_down,
+            "key_first"         => l.kb_first,
+            "key_last"          => l.kb_last,
+            "fixed_header_nav"    => l.kb_header_nav,
+            "fixed_header_sel"    => l.kb_header_sel,
+            "fixed_header_ops"    => l.kb_header_ops,
+            "fixed_header_tabs"   => l.kb_header_tabs,
+            "fixed_header_drives" => l.kb_header_drives,
+            "fixed_header_app"    => l.kb_header_app,
             "key_select"        => l.kb_select,
             "key_select_all"    => l.kb_select_all,
+            "key_select_all_alt"=> l.kb_select_all2,
+            "key_deselect"      => l.kb_deselect_all,
             "key_copy"          => l.kb_copy,
             "key_cut"           => l.kb_cut,
             "key_paste"         => l.kb_paste,
             "key_delete"        => l.kb_delete,
+            "key_trash"         => l.kb_trash_open,
             "key_rename"        => l.kb_rename,
             "key_new_file"      => l.kb_new_file,
             "key_new_dir"       => l.kb_new_dir,
             "key_search"        => l.kb_search,
             "key_toggle_hidden" => l.kb_toggle_hidden,
+            "key_open_with"     => l.kb_open_with,
+            "key_drives"        => l.kb_drives,
+            "key_drive_mount"   => l.kb_drive_mount,
+            "key_drive_unmount" => l.kb_drive_unmount,
+            "key_drive_refresh" => l.kb_drive_refresh,
+            "key_trash_browser" => l.kb_trash_open,
+            "key_settings"      => l.kb_settings,
+            "key_help"          => l.kb_help,
             "key_new_tab"       => l.kb_new_tab,
             "key_close_tab"     => l.kb_close_tab,
             "key_cycle_tab"     => l.kb_cycle_tab,
             "key_quit"          => l.kb_quit,
-            "fixed_drives"      => l.kb_drives,
-            "fixed_drive_m"     => l.kb_drive_mount,
-            "fixed_drive_u"     => l.kb_drive_unmount,
-            "fixed_drive_r"     => l.kb_drive_refresh,
-            "fixed_nav"         => l.kb_navigate,
-            "fixed_open"        => l.kb_open,
-            "fixed_up"          => l.kb_go_up,
-            "fixed_pgupdown"    => l.kb_jump,
-            "fixed_homeend"     => l.kb_first_last,
-            "fixed_deselect"    => l.kb_deselect_all,
-            "fixed_sel_all2"    => l.kb_select_all2,
-            "fixed_open_with"   => l.kb_open_with,
-            "fixed_settings"    => l.kb_settings,
-            "fixed_help"        => l.kb_help,
-            "fixed_quit2"       => l.kb_quit2,
-            "fixed_about_app"   => l.about_app,
             "fixed_about_ver"   => l.about_ver,
             "fixed_about_author"=> l.about_author,
             "fixed_about_license"=>l.about_license,
@@ -1253,11 +1627,23 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
     let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (key, label))| {
         let label = translate_label(key, label);
         let val = SettingsState::get_value(key, &app.cfg);
-        let is_cur = i == app.settings.cursor;
-        let is_fixed = key.starts_with("fixed_");
+        let is_cur    = i == app.settings.cursor;
+        let is_fixed  = key.starts_with("fixed_");
+        let is_header = key.starts_with("fixed_header_");
         let val_display = if app.settings.editing && is_cur {
             format!("{}{}", app.settings.edit_buf, app.icons.chrome.cursor_block)
+        } else if key.starts_with("key_") && app.settings.section == SettingsSection::Keybinds && !val.is_empty() {
+            // Show keybind values with pretty / separator between independent bindings
+            val.split('/').map(|s| s.trim()).collect::<Vec<_>>().join(" / ")
         } else { val };
+
+        if is_header {
+            // Section divider — full-width accent line, never selectable
+            return ListItem::new(Line::from(vec![
+                Span::styled(format!("  {}", label), bold(app.theme.accent)),
+            ]));
+        }
+
         let (lbg, vbg) = if is_cur { (app.theme.bg_panel, app.theme.bg_popup) } else { (app.theme.bg_primary, app.theme.bg_primary) };
         let (lfg, vfg) = if is_fixed {
             (app.theme.fg_muted, app.theme.fg_muted)
@@ -1614,9 +2000,17 @@ fn draw_input_overlay(f: &mut Frame, app: &App, rect: Rect) {
         .borders(Borders::ALL)
         .border_style(bold(app.theme.accent))
         .style(st_bg(app.theme.fg_primary, app.theme.bg_primary));
-    let text = format!(" {}: {}{}", prompt, app.input_buf, app.icons.chrome.cursor_block);
-    let p = Paragraph::new(text).block(block).style(bold(app.theme.fg_primary));
-    f.render_widget(p, popup);
+
+    // Split text at cursor position for rendering
+    let before = &app.input_buf[..app.input_cursor.min(app.input_buf.len())];
+    let after  = &app.input_buf[app.input_cursor.min(app.input_buf.len())..];
+
+    let line = Line::from(vec![
+        Span::styled(format!(" {}: {}", prompt, before), bold(app.theme.fg_primary)),
+        Span::styled(app.icons.chrome.cursor_block.clone(), bold(app.theme.accent)),
+        Span::styled(after.to_string(), bold(app.theme.fg_primary)),
+    ]);
+    f.render_widget(Paragraph::new(line).block(block), popup);
 }
 
 fn draw_confirm_overlay(f: &mut Frame, app: &App, rect: Rect) {

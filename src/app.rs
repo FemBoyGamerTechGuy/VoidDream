@@ -18,7 +18,8 @@ pub struct App {
     pub yank:        Vec<PathBuf>,
     pub yank_cut:    bool,
     pub mode:        InputMode,
-    pub input_buf:   String,
+    pub input_buf:    String,
+    pub input_cursor: usize,  // byte offset of cursor in input_buf
     pub status_msg:  String,
     pub status_err:  bool,
     pub msg_time:    Option<Instant>,
@@ -80,6 +81,24 @@ pub struct App {
     pub delete_progress: Option<DeleteProgress>,
     pub delete_rx:       Option<mpsc::Receiver<DeleteProgress>>,
     pub delete_cancel:   Option<Arc<AtomicBool>>,
+    // Trash progress
+    pub trash_progress:  Option<TrashProgress>,
+    pub trash_rx:        Option<mpsc::Receiver<TrashProgress>>,
+    // Trash browser
+    pub trash_entries:   Vec<crate::trash::TrashEntry>,
+    pub trash_cursor:    usize,
+    // First-run setup wizard
+    pub setup_step:      SetupStep,
+    pub setup_cursor:    usize,
+    pub setup_custom:    String,   // typed text when "custom" is selected
+    pub setup_typing:    bool,     // true when user is typing a custom value
+    // Keybind editor
+    pub keybind_key:          String,
+    pub keybind_label:        String,
+    pub keybind_menu_cursor:  usize,
+    pub keybind_capture_mode: u8,     // 0=add isolated 1=combo step1 2=combo step2
+    pub keybind_combo_first:  String, // first key of a combo being built
+    pub keybind_remove_cursor: usize, // cursor in remove-binding list
 }
 impl App {
     pub fn new(start: PathBuf, cfg: Config) -> Self {
@@ -87,11 +106,12 @@ impl App {
         let icons = IconData::load(&cfg.icon_set);
         let theme = Theme::load(&cfg.theme);
         let lang  = crate::lang::load(&cfg.language);
-        Self {
+        let first_run = cfg.first_run;
+        let mut app = Self {
             theme, icons,
             tabs: vec![Tab::new(start, sh)], tab_idx: 0,
             yank: vec![], yank_cut: false,
-            mode: InputMode::Normal, input_buf: String::new(),
+            mode: InputMode::Normal, input_buf: String::new(), input_cursor: 0,
             status_msg: String::new(), status_err: false,
             msg_time: None, nvim_path: None,
             settings: SettingsState::new(), cfg,
@@ -128,7 +148,25 @@ impl App {
             delete_progress: None,
             delete_rx: None,
             delete_cancel: None,
+            trash_progress: None,
+            trash_rx: None,
+            trash_entries: Vec::new(),
+            trash_cursor: 0,
+            setup_step:   SetupStep::Language,
+            setup_cursor: 0,
+            setup_custom: String::new(),
+            setup_typing: false,
+            keybind_key:           String::new(),
+            keybind_label:         String::new(),
+            keybind_menu_cursor:   0,
+            keybind_capture_mode:  0,
+            keybind_combo_first:   String::new(),
+            keybind_remove_cursor: 0,
+        };
+        if first_run {
+            app.mode = InputMode::FirstRunSetup;
         }
+        app
     }
     pub fn tab(&self)         -> &Tab     { &self.tabs[self.tab_idx] }
     pub fn tab_mut(&mut self) -> &mut Tab { &mut self.tabs[self.tab_idx] }
@@ -280,6 +318,38 @@ impl App {
                         .map(|d| d.start_time)
                         .unwrap_or_else(Instant::now);
                     self.delete_progress = Some(DeleteProgress { start_time: st, ..p });
+                }
+            }
+        }
+
+        // Drain trash progress channel
+        if self.trash_rx.is_some() {
+            let mut last: Option<TrashProgress> = None;
+            let mut done = false;
+            if let Some(rx) = &self.trash_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                        Err(_) => break,
+                    }
+                }
+            }
+            if let Some(p) = last {
+                if done {
+                    if let Some(ref e) = p.error.clone() {
+                        self.msg(&format!("Trash error: {}", e), true);
+                    } else {
+                        self.msg(&format!("Moved {} item(s) to trash", p.files_total), false);
+                    }
+                    self.tab_mut().refresh();
+                    self.trash_rx       = None;
+                    self.trash_progress = None;
+                    self.mode           = InputMode::Normal;
+                } else {
+                    let st = self.trash_progress.as_ref()
+                        .map(|t| t.start_time)
+                        .unwrap_or_else(Instant::now);
+                    self.trash_progress = Some(TrashProgress { start_time: st, ..p });
                 }
             }
         }
@@ -563,6 +633,101 @@ impl App {
         });
         self.delete_rx = Some(rx);
         self.mode      = InputMode::Deleting;
+    }
+
+    pub fn trash_files(&mut self) {
+        let targets: Vec<PathBuf> = if !self.tab().selected.is_empty() {
+            self.tab().selected.iter().cloned().collect()
+        } else if let Some(p) = self.tab().current().cloned() { vec![p] }
+        else { return; };
+
+        let files_total = targets.len() as u64;
+        let (tx, rx)    = mpsc::channel::<TrashProgress>();
+        let start_time  = Instant::now();
+
+        std::thread::spawn(move || {
+            let mut first_error: Option<String> = None;
+            for (i, src) in targets.iter().enumerate() {
+                let name = src.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let _ = tx.send(TrashProgress {
+                    current_file: name,
+                    files_done: i as u64,
+                    files_total,
+                    done: false, error: None, start_time,
+                });
+                if let Err(e) = crate::trash::move_to_trash(src) {
+                    if first_error.is_none() { first_error = Some(e); }
+                }
+            }
+            let _ = tx.send(TrashProgress {
+                current_file: String::new(),
+                files_done: files_total,
+                files_total,
+                done: true,
+                error: first_error,
+                start_time,
+            });
+        });
+
+        self.tab_mut().selected.clear();
+        self.trash_progress = Some(TrashProgress {
+            current_file: String::new(),
+            files_done: 0, files_total,
+            done: false, error: None, start_time,
+        });
+        self.trash_rx = Some(rx);
+        self.mode     = InputMode::Trashing;
+    }
+
+    pub fn open_trash_browser(&mut self) {
+        self.trash_entries = crate::trash::list_trash();
+        self.trash_cursor  = 0;
+        self.mode          = InputMode::TrashBrowser;
+    }
+
+    pub fn trash_restore(&mut self) {
+        if let Some(entry) = self.trash_entries.get(self.trash_cursor).cloned() {
+            match crate::trash::restore_entry(&entry) {
+                Ok(())   => {
+                    self.msg(&format!("Restored: {}", entry.original_path.display()), false);
+                    self.trash_entries = crate::trash::list_trash();
+                    if self.trash_cursor >= self.trash_entries.len() && self.trash_cursor > 0 {
+                        self.trash_cursor -= 1;
+                    }
+                    self.tab_mut().refresh();
+                }
+                Err(e) => { self.msg(&format!("Restore failed: {}", e), true); }
+            }
+        }
+    }
+
+    pub fn trash_purge_selected(&mut self) {
+        if let Some(entry) = self.trash_entries.get(self.trash_cursor).cloned() {
+            match crate::trash::purge_entry(&entry) {
+                Ok(())   => {
+                    self.msg("Permanently deleted from trash", false);
+                    self.trash_entries = crate::trash::list_trash();
+                    if self.trash_cursor >= self.trash_entries.len() && self.trash_cursor > 0 {
+                        self.trash_cursor -= 1;
+                    }
+                }
+                Err(e) => { self.msg(&format!("Purge failed: {}", e), true); }
+            }
+        }
+    }
+
+    pub fn trash_empty(&mut self) {
+        match crate::trash::empty_trash() {
+            Ok(())   => {
+                self.msg("Trash emptied", false);
+                self.trash_entries.clear();
+                self.trash_cursor = 0;
+            }
+            Err(e) => { self.msg(&format!("Empty trash failed: {}", e), true); }
+        }
     }
     /// Spawn an external program silently (no stdin/stdout/stderr).
     fn spawn_silent(cmd: &str, arg: &std::path::Path) {
@@ -899,14 +1064,14 @@ impl App {
             entries.push(("Java runtime".into(), cfg.opener_jar.clone()));
         }
 
-        // Always offer: editor, image viewer, video player, browser, xdg-open
+        // Always offer: editor, image viewer, video player, browser, system default
         let always = [
             ("Text editor",    cfg.opener_editor.clone()),
             ("Image viewer",   cfg.opener_image.clone()),
             ("Video player",   cfg.opener_video.clone()),
             ("Audio player",   cfg.opener_audio.clone()),
             ("Browser",        cfg.opener_browser.clone()),
-            ("xdg-open",       "xdg-open".into()),
+            ("System default", "xdg-open".into()),
         ];
         for (label, cmd) in &always {
             // Skip if already in list (same cmd)

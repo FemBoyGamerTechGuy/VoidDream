@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.8] - 2026-04-15
+
+> **This is the last major release for now.** VoidDream isn't going anywhere and development is not stopping — but I'm temporarily shifting focus to two other projects that I think will genuinely shake things up in the Linux space. VoidDream will still receive bug fixes. When those projects are done, I'll be back.
+
+### Added
+- **Cursor movement in rename / new file / new dir** — Left/Right arrows move the cursor inside the text, Home/End jump to start/end, Delete removes the character at the cursor. You can now edit any part of a filename without retyping it entirely.
+- **Keybind editor reworked** — Three clear options: Add one key binding (single key, works alone), Add combination (two-step capture, keys joined with `+`), Remove a binding (pick from list). Multiple independent bindings shown with ` / ` separator.
+- **Every navigation key is now configurable** — `nav_up`, `nav_down`, `nav_left`, `nav_right`, `page_up`, `page_down`, `first`, `last` all editable from Settings → Keybinds.
+- **Drive sub-keys configurable** — mount, unmount and refresh keys for the drive manager are now user-configurable (defaults: `m`, `u`, `r`).
+- **Section headers in the keybinds list** — Navigation, Selection, File Operations, Tabs, Drives and App sections now have visible headers; cursor skips over them cleanly.
+- **First-run welcome screen** — new users are greeted with a setup overlay on first launch to configure the basics before jumping in.
+- **Keybind UI fully translated** — all keybind editor overlays (add, combo, remove, reset) now use the active language instead of hardcoded English strings. All 12 languages covered.
+
+### Changed
+- Keybind "Add isolated binding" renamed to "Add one key binding" for clarity.
+- Settings → Keybinds section reorganised with labelled groups for easier navigation.
+
+### Fixed
+- Input cursor was always stuck at the end of text — now tracks position correctly for mid-text editing.
+
+---
+
 ## [0.1.7] - 2026-04-05
 
 ### Changed

@@ -1,6 +1,6 @@
 # Maintainer: FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>
 pkgname=voiddream
-pkgver=0.1.7
+pkgver=0.1.8
 pkgrel=1
 pkgdesc="A dreamy void-themed TUI file manager built with Rust and Ratatui"
 arch=('x86_64' 'aarch64')
@@ -8,63 +8,63 @@ url="https://github.com/FemBoyGamerTechGuy/VoidDream"
 license=('LicenseRef-VoidDream-1.0')
 depends=('gcc-libs' 'zstd' 'chafa' 'glib2')
 optdepends=(
-    'ffmpeg: video thumbnails'
-    'mpv: video and audio playback'
-    'neovim: text editor integration'
-    'unrar: .rar extraction'
+  'ffmpeg: video thumbnails'
+  'mpv: video and audio playback'
+  'neovim: text editor integration'
+  'unrar: .rar extraction'
 )
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 source=("$pkgname::git+https://github.com/FemBoyGamerTechGuy/VoidDream.git")
 sha256sums=('SKIP')
 
 pkgver() {
-    cd "$pkgname"
-    local ver
-    ver="$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
-    printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  cd "$pkgname"
+  local ver
+  ver="$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+  printf '%s.r%s.g%s' "$ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {
-    cd "$pkgname"
-    export RUSTUP_TOOLCHAIN=stable
-    cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "$pkgname"
-    export RUSTUP_TOOLCHAIN=stable
-    export CARGO_TARGET_DIR=target
-    # Use pkg-config to link against the system zstd shared library
-    # instead of trying to build the bundled static copy, which fails
-    # in the makepkg sandbox with lld.
-    export ZSTD_SYS_USE_PKG_CONFIG=1
-    cargo build --release
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Use pkg-config to link against the system zstd shared library
+  # instead of trying to build the bundled static copy, which fails
+  # in the makepkg sandbox with lld.
+  export ZSTD_SYS_USE_PKG_CONFIG=1
+  cargo build --release
 }
 
 package() {
-    cd "$pkgname"
+  cd "$pkgname"
 
-    # Binary
-    install -Dm755 target/release/VoidDream \
-        "$pkgdir/usr/bin/VoidDream"
+  # Binary
+  install -Dm755 target/release/VoidDream \
+    "$pkgdir/usr/bin/VoidDream"
 
-    # Themes
-    install -dm755 "$pkgdir/usr/share/VoidDream/themes"
-    install -Dm644 themes/*.json \
-        "$pkgdir/usr/share/VoidDream/themes/"
+  # Themes
+  install -dm755 "$pkgdir/usr/share/VoidDream/themes"
+  install -Dm644 themes/*.json \
+    "$pkgdir/usr/share/VoidDream/themes/"
 
-    # Icon sets
-    install -dm755 "$pkgdir/usr/share/VoidDream/icons"
-    install -Dm644 icons/*.json \
-        "$pkgdir/usr/share/VoidDream/icons/"
+  # Icon sets
+  install -dm755 "$pkgdir/usr/share/VoidDream/icons"
+  install -Dm644 icons/*.json \
+    "$pkgdir/usr/share/VoidDream/icons/"
 
-    # Desktop entry
-    if [[ -f assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop ]]; then
-        install -Dm644 assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
-            "$pkgdir/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop"
-    fi
+  # Desktop entry
+  if [[ -f assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop ]]; then
+    install -Dm644 assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
+      "$pkgdir/usr/share/applications/io.github.FemBoyGamerTechGuy.VoidDream.desktop"
+  fi
 
-    # License
-    install -Dm644 LICENSE \
-        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # License
+  install -Dm644 LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

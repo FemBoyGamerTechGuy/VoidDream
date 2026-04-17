@@ -5,6 +5,7 @@ mod lang;
 mod app;
 mod extract;
 mod drives;
+mod trash;
 mod ui;
 mod keys;
 

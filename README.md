@@ -7,8 +7,8 @@
 [![License: Proprietary](https://img.shields.io/badge/license-VoidDream%20Proprietary%20v1.0-blueviolet?style=flat-square)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Rust version](https://img.shields.io/badge/rust-%3E%3D1.85-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.7-blueviolet?style=flat-square)](CHANGELOG.md)
-[![Status: Active](https://img.shields.io/badge/status-active%20development-brightgreen?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.1.8-blueviolet?style=flat-square)](CHANGELOG.md)
+[![Status: On Pause](https://img.shields.io/badge/status-on%20pause%20(temporary)-orange?style=flat-square)](CHANGELOG.md)
 [![Part of Faded Dream](https://img.shields.io/badge/part%20of-Faded%20Dream-purple?style=flat-square)](https://github.com/FemBoyGamerTechGuy/Faded-Dream-dotfiles)
 
 </div>
@@ -18,6 +18,8 @@
 ## Overview
 
 VoidDream is a fast, keyboard-driven file manager for the terminal. It features a classic three-pane layout, live file previews, fuzzy search, multi-tab navigation, and a fully themeable interface — all configurable without touching a config file manually.
+
+> **Development is temporarily on pause.** I'm shifting focus to two other projects that I believe will make a real impact on the Linux ecosystem. VoidDream is not abandoned — bug fixes will still land, and I'll be back when those projects are done.
 
 ---
 
@@ -43,7 +45,8 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 | 🕐 | **Live clock** in tab bar with local timezone, toggleable file date/time column |
 | 🎨 | **21 built-in themes** + community theme support |
 | 🔤 | **Nerd Font, Emoji, Minimal and None** icon sets |
-| ⌨️ | **Fully configurable keybinds** |
+| ⌨️ | **Fully configurable keybinds** — every key changeable, with multi-binding and combo support |
+| ✏️ | **Cursor editing in rename/new file** — move, jump to start/end, delete at cursor position |
 | 📂 | **Configurable file openers** per file type |
 | 📦 | **Native archive extraction** — ZIP, TAR, GZ, BZ2, XZ, ZST via pure Rust; RAR via `unrar` |
 | 📁 | **Folder size display** — async, non-blocking, matches file manager readings |
@@ -51,7 +54,8 @@ VoidDream is a fast, keyboard-driven file manager for the terminal. It features 
 | 🌐 | **HTML support** — opens in configured browser, configurable separately |
 | 💾 | **Drive / USB / phone manager** (`Shift+D`) — mount and unmount drives and Android phones |
 | 🌍 | **12 languages** — EN, RO, FR, DE, ES, IT, PT, RU, JA, ZH, KO, AR |
-| ⚙️ | **Settings UI** with live apply, About section, scrollable help |
+| 🎉 | **First-run welcome screen** — guided setup on first launch |
+| ⚙️ | **Settings UI** with live apply, organised keybinds section, About, scrollable help |
 
 ---
 
