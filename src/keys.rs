@@ -375,16 +375,10 @@ pub fn handle_runargs_key(app: &mut App, key: KeyCode) {
             let ext  = path.extension().and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase()).unwrap_or_default();
             let is_script = matches!(ext.as_str(), "sh"|"bash"|"zsh"|"fish");
-            let is_exec = {
-                #[cfg(unix)] {
-                    use std::os::unix::fs::PermissionsExt;
-                    path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-                }
-                #[cfg(not(unix))] { false }
-            };
             let path_escaped = path.to_string_lossy().replace("'", "'\''");
 
-            let base_cmd = if is_script && !is_exec {
+            // is_executable() is the shared helper defined in app.rs — same check used in open_current.
+            let base_cmd = if is_script && !crate::app::is_executable(&path) {
                 match ext.as_str() {
                     "fish" => format!("fish '{}'", path_escaped),
                     "zsh"  => format!("zsh '{}'",  path_escaped),
@@ -514,7 +508,7 @@ pub fn handle_input_key(app: &mut App, key: KeyCode) {
     }
 }
 
-/// Spawn a shell command silently (no stdin/stdout/stderr).
+// Handle Open With overlay keypresses.
 pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => { app.mode = InputMode::Normal; }
@@ -545,19 +539,9 @@ pub fn handle_openwith_key(app: &mut App, key: KeyCode) {
                             app.msg(&format!("Opening with {}", cmd), false);
                             app.nvim_path = Some(path);
                         } else {
-                            // GUI apps and xdg-open must be spawned directly
-                            // (not via sh -c) so they inherit the full session
-                            // environment including DISPLAY, WAYLAND_DISPLAY,
-                            // DBUS_SESSION_BUS_ADDRESS etc.
-                            let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-                            let bin = parts[0];
-                            let mut command = std::process::Command::new(bin);
-                            if parts.len() > 1 { command.arg(parts[1]); }
-                            command.arg(&path)
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null());
-                            let _ = command.spawn();
+                            // GUI apps and xdg-open: spawn directly (not via sh -c)
+                            // so they inherit the full session env (DISPLAY, WAYLAND_DISPLAY…).
+                            spawn_gui_open(&cmd, &path);
                             app.msg(&format!("Opening with {}", cmd), false);
                         }
                     }
@@ -589,16 +573,7 @@ pub fn handle_openwith_custom_key(app: &mut App, key: KeyCode) {
                 app.msg(&format!("Opening with {}", cmd), false);
                 app.nvim_path = Some(path);
             } else {
-                // Spawn directly so GUI apps inherit the full session env
-                let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-                let bin = parts[0];
-                let mut command = std::process::Command::new(bin);
-                if parts.len() > 1 { command.arg(parts[1]); }
-                command.arg(&path)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                let _ = command.spawn();
+                spawn_gui_open(&cmd, &path);
                 app.msg(&format!("Opening with {}", cmd), false);
             }
         }
@@ -818,6 +793,25 @@ pub fn handle_keybind_remove(app: &mut App, key: KeyCode) {
         }
         _ => {}
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Spawn a GUI application (or xdg-open) with `path` as its argument.
+/// The command string may contain a leading argument separated by a space,
+/// e.g. `"java -jar"` splits into binary=`java`, first_arg=`-jar`.
+/// Spawned without stdin/stdout/stderr so it does not touch the TUI.
+/// Must be launched directly (not via `sh -c`) so the child process inherits
+/// the full desktop session environment: DISPLAY, WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS…
+fn spawn_gui_open(cmd: &str, path: &std::path::Path) {
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let mut c = std::process::Command::new(parts[0]);
+    if parts.len() > 1 { c.arg(parts[1]); }
+    c.arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = c.spawn();
 }
 
 fn reset_keybind_default(app: &mut App) {

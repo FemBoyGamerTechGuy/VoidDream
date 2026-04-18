@@ -313,7 +313,9 @@ pub struct CopyProgress {
     pub is_cut:          bool,
 }
 
-// ─── DeleteProgress ───────────────────────────────────────────────────────────
+// ─── DeleteProgress / TrashProgress ───────────────────────────────────────────
+// Both operations track the same data, so one struct serves both.
+// `is_trash` is not stored — the caller knows which operation it started.
 
 #[derive(Clone)]
 pub struct DeleteProgress {
@@ -325,17 +327,8 @@ pub struct DeleteProgress {
     pub start_time:   Instant,
 }
 
-// ─── TrashProgress ────────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct TrashProgress {
-    pub current_file: String,
-    pub files_done:   u64,
-    pub files_total:  u64,
-    pub done:         bool,
-    pub error:        Option<String>,
-    pub start_time:   Instant,
-}
+/// Alias — trash and delete share the same progress shape.
+pub type TrashProgress = DeleteProgress;
 
 // ─── InputMode ────────────────────────────────────────────────────────────────
 

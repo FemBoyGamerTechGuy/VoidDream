@@ -5,6 +5,28 @@ use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 use crate::types::FileKind;
 
+
+/// Scan a list of directories for `.json` files and return their stems (the name
+/// without extension), deduplicated and sorted.  Later dirs override earlier ones
+/// by inserting into the same set — the final sort produces a stable merged list.
+fn json_stem_names_in_dirs(dirs: &[PathBuf]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::<String>::new();
+    for dir in dirs {
+        if !dir.exists() { continue; }
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.filter_map(|e| e.ok()) {
+                if e.path().extension().and_then(|x| x.to_str()) != Some("json") { continue; }
+                if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                    seen.insert(stem.to_string());
+                }
+            }
+        }
+    }
+    let mut v: Vec<String> = seen.into_iter().collect();
+    v.sort();
+    v
+}
+
 // ─── Style helpers ─────────────────────────────────────────────────────────────
 pub fn st(fg: Color) -> Style { Style::default().fg(fg) }
 pub fn st_bg(fg: Color, bg: Color) -> Style { Style::default().fg(fg).bg(bg) }
@@ -35,11 +57,21 @@ impl ThemeFile {
 
 /// Returns the XDG data home dir: $XDG_DATA_HOME if set, else ~/.local/share
 pub fn xdg_data_home() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() { return PathBuf::from(xdg); }
+    xdg_env_or("XDG_DATA_HOME", ".local/share")
+}
+
+/// Returns the XDG config home dir: $XDG_CONFIG_HOME if set, else ~/.config
+pub fn xdg_config_home() -> PathBuf {
+    xdg_env_or("XDG_CONFIG_HOME", ".config")
+}
+
+/// Shared helper: resolve an XDG env var or fall back to $HOME/<fallback_suffix>.
+fn xdg_env_or(var: &str, fallback_suffix: &str) -> PathBuf {
+    if let Ok(val) = std::env::var(var) {
+        if !val.is_empty() { return PathBuf::from(val); }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home).join(".local").join("share")
+    PathBuf::from(home).join(fallback_suffix)
 }
 
 pub fn parse_hex(s: &str) -> Color {
@@ -182,22 +214,7 @@ impl Theme {
 
     #[allow(dead_code)]
     pub fn installed_names() -> Vec<String> {
-        let mut seen = std::collections::HashMap::<String,()>::new();
-        for dir in Self::theme_dirs() {
-            if !dir.exists() { continue; }
-            if let Ok(rd) = fs::read_dir(&dir) {
-                let mut names: Vec<String> = rd
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-                    .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                    .collect();
-                names.sort();
-                for n in names { seen.insert(n, ()); }
-            }
-        }
-        let mut v: Vec<String> = seen.into_keys().collect();
-        v.sort();
-        v
+        json_stem_names_in_dirs(&Self::theme_dirs())
     }
 
     /// Load a theme by name, scanning system then user dirs (user wins).
@@ -459,22 +476,7 @@ impl IconData {
 
     #[allow(dead_code)]
     pub fn installed_names() -> Vec<String> {
-        let mut seen = std::collections::HashMap::<String,()>::new();
-        for dir in Self::icon_dirs() {
-            if !dir.exists() { continue; }
-            if let Ok(rd) = fs::read_dir(&dir) {
-                let mut names: Vec<String> = rd
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-                    .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
-                    .collect();
-                names.sort();
-                for n in names { seen.insert(n, ()); }
-            }
-        }
-        let mut v: Vec<String> = seen.into_keys().collect();
-        v.sort();
-        v
+        json_stem_names_in_dirs(&Self::icon_dirs())
     }
 
     /// Load an icon set by name.  Later dirs (user) override earlier (system).
@@ -675,7 +677,6 @@ fn single_key_matches(b: &str, key: crossterm::event::KeyCode) -> bool {
     }
 }
 
-/// Convert a raw keypress into a canonical string for storage.
 /// Convert a keypress into a canonical binding string for storage.
 /// Returns None for keys we never want to capture (Esc).
 pub fn keycode_to_string(key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Option<String> {
@@ -762,13 +763,7 @@ impl Default for Config {
 
 impl Config {
     fn config_path() -> PathBuf {
-        let cfg_home = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            if !xdg.is_empty() { PathBuf::from(xdg) }
-            else { PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into())).join(".config") }
-        } else {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into())).join(".config")
-        };
-        cfg_home.join("VoidDream").join("config.json")
+        xdg_config_home().join("VoidDream").join("config.json")
     }
 
     /// Detect the best available browser on the system.

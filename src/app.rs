@@ -182,49 +182,37 @@ impl App {
                 self.status_msg.clear(); self.msg_time = None;
             }
         }
-        // Drain async folder size result
-        if self.folder_size_rx.is_some() {
-            let done = if let Some(rx) = &self.folder_size_rx {
-                match rx.try_recv() {
-                    Ok(size) => { self.folder_size_val = Some(size); true }
-                    Err(mpsc::TryRecvError::Disconnected) => true,
-                    Err(mpsc::TryRecvError::Empty) => false,
-                }
-            } else { false };
+        // Drain async folder size result. Clear the channel once a value arrives.
+        if let Some(rx) = &self.folder_size_rx {
+            let done = match rx.try_recv() {
+                Ok(size) => { self.folder_size_val = Some(size); true }
+                Err(mpsc::TryRecvError::Disconnected) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+            };
             if done { self.folder_size_rx = None; }
         }
         // Spawn du once debounce expires
         self.maybe_spawn_folder_size();
-        // Drain async parent-pane dir load
-        if self.parent_load_rx.is_some() {
-            let result = if let Some(rx) = &self.parent_load_rx {
-                match rx.try_recv() {
-                    Ok(entries) => Some(entries),
-                    Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                }
-            } else { None };
-            if let Some(entries) = result {
-                self.parent_load_rx = None;
-                let tab = &mut self.tabs[self.tab_idx];
-                tab.parent_entries = entries;
-                    }
+        // Drain async parent-pane dir load.
+        // We borrow the Receiver separately so we can mutate the tab afterwards.
+        if let Some(result) = self.parent_load_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(entries) => Some(entries),
+            Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }) {
+            self.parent_load_rx = None;
+            self.tabs[self.tab_idx].parent_entries = result;
         }
         self.maybe_spawn_parent_load();
-        // Drain async preview-pane dir load
-        if self.preview_load_rx.is_some() {
-            let result = if let Some(rx) = &self.preview_load_rx {
-                match rx.try_recv() {
-                    Ok(entries) => Some(entries),
-                    Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                }
-            } else { None };
-            if let Some(entries) = result {
-                self.preview_load_rx = None;
-                let tab = &mut self.tabs[self.tab_idx];
-                tab.preview_entries = entries;
-                    }
+
+        // Same pattern for the preview pane.
+        if let Some(result) = self.preview_load_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(entries) => Some(entries),
+            Err(mpsc::TryRecvError::Disconnected) => Some(vec![]),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }) {
+            self.preview_load_rx = None;
+            self.tabs[self.tab_idx].preview_entries = result;
         }
         self.maybe_spawn_preview_load();
         // Drain streamed paths — collect into local vec first to avoid borrow conflicts
@@ -255,16 +243,15 @@ impl App {
                 }
             }
         }
-        // Drain copy/move progress channel
-        if self.copy_rx.is_some() {
+        // Drain copy/move channel — keep only the latest update each tick.
+        // Borrow the Receiver immutably here; mutation happens below after the borrow drops.
+        if let Some(rx) = &self.copy_rx {
             let mut last: Option<CopyProgress> = None;
             let mut done = false;
-            if let Some(rx) = &self.copy_rx {
-                loop {
-                    match rx.try_recv() {
-                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
-                        Err(_) => break,
-                    }
+            loop {
+                match rx.try_recv() {
+                    Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                    Err(_) => break,
                 }
             }
             if let Some(p) = last {
@@ -289,16 +276,14 @@ impl App {
             }
         }
 
-        // Drain delete progress channel
-        if self.delete_rx.is_some() {
+        // Drain delete channel.
+        if let Some(rx) = &self.delete_rx {
             let mut last: Option<DeleteProgress> = None;
             let mut done = false;
-            if let Some(rx) = &self.delete_rx {
-                loop {
-                    match rx.try_recv() {
-                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
-                        Err(_) => break,
-                    }
+            loop {
+                match rx.try_recv() {
+                    Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                    Err(_) => break,
                 }
             }
             if let Some(p) = last {
@@ -322,16 +307,14 @@ impl App {
             }
         }
 
-        // Drain trash progress channel
-        if self.trash_rx.is_some() {
+        // Drain trash channel.
+        if let Some(rx) = &self.trash_rx {
             let mut last: Option<TrashProgress> = None;
             let mut done = false;
-            if let Some(rx) = &self.trash_rx {
-                loop {
-                    match rx.try_recv() {
-                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
-                        Err(_) => break,
-                    }
+            loop {
+                match rx.try_recv() {
+                    Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                    Err(_) => break,
                 }
             }
             if let Some(p) = last {
@@ -354,16 +337,14 @@ impl App {
             }
         }
 
-        // Drain extraction progress channel
-        if self.extract_rx.is_some() {
+        // Drain extraction channel.
+        if let Some(rx) = &self.extract_rx {
             let mut last: Option<ExtractionProgress> = None;
             let mut done = false;
-            if let Some(rx) = &self.extract_rx {
-                loop {
-                    match rx.try_recv() {
-                        Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
-                        Err(_) => break,
-                    }
+            loop {
+                match rx.try_recv() {
+                    Ok(p) => { done = p.done || p.error.is_some(); last = Some(p); }
+                    Err(_) => break,
                 }
             }
             if let Some(p) = last {
@@ -393,12 +374,15 @@ impl App {
             }
         }
 
-        // Clear image state if we've navigated away from an image
-        let is_image = self.tab().current()
+        // Compute current file extension once — reused for both image and video checks.
+        let cur_ext = self.tab().current()
             .and_then(|p| p.extension())
             .and_then(|e| e.to_str())
-            .map(|e| IMAGE_EXT.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false);
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+
+        // Clear image preview state when cursor moves off an image file.
+        let is_image = IMAGE_EXT.contains(&cur_ext.as_str());
         if !is_image && (self.img_state.is_some() || self.img_rx.is_some()) {
             self.img_path     = None;
             self.img_pending  = None;
@@ -407,12 +391,8 @@ impl App {
             self.img_debounce = None;
         }
 
-        // Clear video thumbnail state if we've navigated away from a video
-        let is_video = self.tab().current()
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .map(|e| VIDEO_EXT.contains(&e.to_lowercase().as_str()))
-            .unwrap_or(false);
+        // Clear video thumbnail state when cursor moves off a video file.
+        let is_video = VIDEO_EXT.contains(&cur_ext.as_str());
         if !is_video {
             if self.vid_thumb_state.is_some() || self.vid_thumb_rx.is_some() || self.vid_debounce.is_some() {
                 if let Some(f) = self.vid_thumb_file.take() { let _ = fs::remove_file(f); }
@@ -769,14 +749,7 @@ impl App {
         else {
             // Shell scripts and executables — run in a new terminal window
             let is_script = matches!(ext, "sh"|"bash"|"zsh"|"fish");
-            let is_exec = {
-                #[cfg(unix)] {
-                    use std::os::unix::fs::PermissionsExt;
-                    path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
-                }
-                #[cfg(not(unix))] { false }
-            };
-            if is_script || is_exec {
+            if is_script || is_executable(&path) {
                 // Open args bar — Enter to launch, Tab toggles prepend/append mode
                 self.input_buf.clear();
                 self.mode = InputMode::RunArgs(path, false, String::new(), String::new());
@@ -792,7 +765,6 @@ impl App {
         self.extract_progress = Some(initial);
         self.mode             = InputMode::Extracting;
     }
-
 
     /// Call after changing tab_idx so the async loaders re-request for the new tab.
     pub fn reset_dir_load_state(&mut self) {
@@ -1201,15 +1173,34 @@ impl App {
     }
 }
 
+// ── Standalone helpers ────────────────────────────────────────────────────────
+
+/// Returns true if `path` has any executable bit set (owner/group/other).
+/// Used in `open_current` and `handle_runargs_key` to decide whether to run
+/// the file in a terminal rather than open it in the editor.
+/// Always returns false on non-Unix targets.
+pub fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))] { false }
+}
+
 // ── Copy-with-progress helpers ────────────────────────────────────────────────
 
-/// Total (bytes, file_count) for a list of source paths (recursive for dirs).
+/// Pre-calculate total (bytes, file_count) across all sources before the thread
+/// starts so the progress bar has a denominator from the beginning.
 fn count_copy_totals(srcs: &[PathBuf]) -> (u64, u64) {
-    let mut bytes: u64 = 0; let mut files: u64 = 0;
+    let mut bytes: u64 = 0;
+    let mut files: u64 = 0;
     for src in srcs { count_recursive(src, &mut bytes, &mut files); }
     (bytes, files)
 }
 
+/// Recursively sum byte sizes and file counts.
+/// Only leaf files contribute — directories are not counted themselves.
+/// (See `count_delete_total` which counts directory nodes too.)
 fn count_recursive(p: &Path, bytes: &mut u64, files: &mut u64) {
     if p.is_dir() {
         if let Ok(rd) = fs::read_dir(p) {
@@ -1231,6 +1222,7 @@ fn src_byte_size(p: &Path) -> u64 {
     }
 }
 
+// Short aliases to keep the progress helper signatures readable.
 type AtomicU64  = std::sync::atomic::AtomicU64;
 type CancelFlag = Arc<AtomicBool>;
 
@@ -1330,19 +1322,21 @@ fn copy_dir_progress(
 
 // ── Delete-with-progress helpers ──────────────────────────────────────────────
 
+/// Count every filesystem node (file + dir) in `targets`, recursively.
+/// Unlike `count_recursive` (copy), this counts directories themselves too —
+/// the delete progress bar ticks once per `remove_file` / `remove_dir` call.
 fn count_delete_total(targets: &[PathBuf]) -> u64 {
-    let mut n = 0u64;
-    for p in targets { count_delete_recursive(p, &mut n); }
-    n
-}
-
-fn count_delete_recursive(p: &Path, n: &mut u64) {
-    *n += 1;
-    if p.is_dir() {
-        if let Ok(rd) = fs::read_dir(p) {
-            for e in rd.filter_map(|e| e.ok()) { count_delete_recursive(&e.path(), n); }
+    fn recurse(p: &Path, n: &mut u64) {
+        *n += 1; // count the node itself before recursing
+        if p.is_dir() {
+            if let Ok(rd) = fs::read_dir(p) {
+                for e in rd.filter_map(|e| e.ok()) { recurse(&e.path(), n); }
+            }
         }
     }
+    let mut n = 0u64;
+    for p in targets { recurse(p, &mut n); }
+    n
 }
 
 fn delete_with_progress(
