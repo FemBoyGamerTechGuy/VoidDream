@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.8-1] - 2026-04-29
+
+### Fixed
+- Copying, deleting, or trashing files with non-UTF-8 characters in their names no longer errors out; filenames are now handled with lossy UTF-8 conversion so special characters display correctly in the progress overlay.
+- Deleting directories that contain symlinks to other directories (e.g. `.wine` / Wine prefix folders) no longer freezes the app; symlinks are now removed directly instead of being followed recursively.
+
+---
+
 ## [0.1.8] - 2026-04-15
 
 > **This is the last major release for now.** VoidDream isn't going anywhere and development is not stopping — but I'm temporarily shifting focus to two other projects that I think will genuinely shake things up in the Linux space. VoidDream will still receive bug fixes. When those projects are done, I'll be back.

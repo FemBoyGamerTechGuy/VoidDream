@@ -482,9 +482,8 @@ impl App {
 
                 let target = dst.join(src.file_name().unwrap_or_default());
                 let name   = src.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("?")
-                    .to_string();
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "?".to_string());
 
                 let bd = bytes_done.load(Ordering::Relaxed);
                 let fd = files_done.load(Ordering::Relaxed);
@@ -578,7 +577,7 @@ impl App {
 
             for p in &targets {
                 if cancel_thr.load(Ordering::Relaxed) { break; }
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".to_string());
 
                 let _ = tx.send(DeleteProgress {
                     current_file: name,
@@ -629,9 +628,8 @@ impl App {
             let mut first_error: Option<String> = None;
             for (i, src) in targets.iter().enumerate() {
                 let name = src.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("?")
-                    .to_string();
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "?".to_string());
                 let _ = tx.send(TrashProgress {
                     current_file: name,
                     files_done: i as u64,
@@ -1202,23 +1200,23 @@ fn count_copy_totals(srcs: &[PathBuf]) -> (u64, u64) {
 /// Only leaf files contribute — directories are not counted themselves.
 /// (See `count_delete_total` which counts directory nodes too.)
 fn count_recursive(p: &Path, bytes: &mut u64, files: &mut u64) {
-    if p.is_dir() {
+    if p.is_dir() && !p.is_symlink() {
         if let Ok(rd) = fs::read_dir(p) {
             for e in rd.filter_map(|e| e.ok()) { count_recursive(&e.path(), bytes, files); }
         }
     } else {
         *files += 1;
-        *bytes += p.metadata().map(|m| m.len()).unwrap_or(0);
+        *bytes += p.symlink_metadata().map(|m| m.len()).unwrap_or(0);
     }
 }
 
 /// Size of a path (for accounting after an atomic rename).
 fn src_byte_size(p: &Path) -> u64 {
-    if p.is_dir() {
+    if p.is_dir() && !p.is_symlink() {
         let (b, _) = count_copy_totals(&[p.to_path_buf()]);
         b
     } else {
-        p.metadata().map(|m| m.len()).unwrap_or(0)
+        p.symlink_metadata().map(|m| m.len()).unwrap_or(0)
     }
 }
 
@@ -1237,7 +1235,7 @@ fn copy_with_progress(
     tx: &mpsc::Sender<CopyProgress>,
     cancel: &CancelFlag,
 ) -> std::io::Result<()> {
-    if src.is_dir() {
+    if src.is_dir() && !src.is_symlink() {
         copy_dir_progress(src, target, bytes_done, bytes_total,
             files_done, files_total, start_time, is_cut, tx, cancel)
     } else {
@@ -1257,7 +1255,7 @@ fn copy_file_progress(
     cancel: &CancelFlag,
 ) -> std::io::Result<()> {
     use std::io::{Read, Write};
-    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".to_string());
     let mut reader  = std::io::BufReader::new(fs::File::open(src)?);
     let mut writer  = fs::File::create(target)?;
     let mut buf     = vec![0u8; 256 * 1024];
@@ -1328,7 +1326,7 @@ fn copy_dir_progress(
 fn count_delete_total(targets: &[PathBuf]) -> u64 {
     fn recurse(p: &Path, n: &mut u64) {
         *n += 1; // count the node itself before recursing
-        if p.is_dir() {
+        if p.is_dir() && !p.is_symlink() {
             if let Ok(rd) = fs::read_dir(p) {
                 for e in rd.filter_map(|e| e.ok()) { recurse(&e.path(), n); }
             }
@@ -1350,7 +1348,7 @@ fn delete_with_progress(
         return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
     }
 
-    if p.is_dir() {
+    if p.is_dir() && !p.is_symlink() {
         // Delete children one by one so we can show progress and respect cancel
         if let Ok(rd) = fs::read_dir(p) {
             for entry in rd.filter_map(|e| e.ok()) {
@@ -1358,7 +1356,7 @@ fn delete_with_progress(
                     return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
                 }
                 let child = entry.path();
-                let name  = child.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+                let name  = child.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "?".to_string());
                 let _ = tx.send(DeleteProgress {
                     current_file: name,
                     files_done:   files_done.load(Ordering::Relaxed),

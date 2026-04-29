@@ -186,7 +186,7 @@ pub fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) -> bool {
     else if key_matches(&cfg.key_trash,      key, mods) { app.trash_files(); }
     else if key_matches(&cfg.key_rename,     key, mods) {
         if let Some(p) = app.tab().current().cloned() {
-            let name = p.file_name().and_then(|n|n.to_str()).unwrap_or("").to_string();
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             app.input_buf = name.clone(); app.input_cursor = name.len(); app.mode = InputMode::Rename(name);
         }
     }

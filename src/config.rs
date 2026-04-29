@@ -994,7 +994,7 @@ impl SettingsState {
             "fixed_pgupdown"   => "Page Up / Page Down  (fixed)".into(),
             "fixed_homeend"    => "Home / End  (fixed)".into(),
             "fixed_about_app"     => "VoidDream".into(),
-            "fixed_about_ver"     => "0.1.8".into(),
+            "fixed_about_ver"     => "0.1.8-1".into(),
             "fixed_about_author"  => "FemBoyGamerTechGuy".into(),
             "fixed_about_license" => "VoidDream Proprietary License v1.0".into(),
             "fixed_about_repo"    => "github.com/FemBoyGamerTechGuy/VoidDream".into(),
