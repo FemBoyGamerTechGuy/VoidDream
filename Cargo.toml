@@ -45,6 +45,8 @@ assets = [
     ["target/release/VoidDream", "usr/bin/", "755"],
     ["themes/*.json",            "usr/share/VoidDream/themes/", "644"],
     ["icons/*.json",             "usr/share/VoidDream/icons/",  "644"],
+    ["assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop", "usr/share/applications/", "644"],
+    ["assets/io.github.FemBoyGamerTechGuy.VoidDream.metainfo.xml",    "usr/share/metainfo/",   "644"],
 ]
 
 # ── .rpm package (cargo-generate-rpm) ─────────────────────────────────────────
@@ -61,4 +63,6 @@ assets = [
     { source = "target/release/VoidDream",  dest = "/usr/bin/VoidDream",              mode = "755" },
     { source = "themes/*.json",             dest = "/usr/share/VoidDream/themes/",    mode = "644" },
     { source = "icons/*.json",              dest = "/usr/share/VoidDream/icons/",     mode = "644" },
+    { source = "assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop", dest = "/usr/share/applications/", mode = "644" },
+    { source = "assets/io.github.FemBoyGamerTechGuy.VoidDream.metainfo.xml",    dest = "/usr/share/metainfo/",     mode = "644" },
 ]
