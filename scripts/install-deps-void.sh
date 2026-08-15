@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-deps-arch.sh — Install required runtime tools for VoidDream on Arch/Artix
+# install-deps-void.sh — Install required runtime tools for VoidDream on Void Linux
 set -euo pipefail
 
 echo "==> Installing VoidDream required runtime tools..."
@@ -8,7 +8,7 @@ echo "     visibly degrades without them — video thumbnails and RAR"
 echo "     extraction won't work, so these are installed by default.)"
 echo ""
 
-sudo pacman -S --needed --noconfirm \
+sudo xbps-install -Sy \
     ffmpeg \
     unrar
 
@@ -28,16 +28,20 @@ echo "-------------------------------------------------------------------"
 echo ""
 echo "Image viewer   (any one):  mirage, feh, nsxiv, eog, gwenview, imv, gimp"
 echo "Video / audio  (any one):  mpv, vlc, celluloid, totem, rhythmbox, audacious"
-echo "Document viewer(any one):  libreoffice-fresh, okular, evince, zathura"
-echo "Editor         (any one):  neovim, vim, nano, helix, emacs"
+echo "Document viewer(any one):  libreoffice, okular, evince, zathura"
+echo "Editor         (any one):  nvim, vim, nano, helix, emacs, micro"
 echo "Terminal       (any one):  kitty, alacritty, foot, wezterm, xterm"
 echo ""
 echo "Example — install a common desktop-friendly set, if you want one:"
-echo "  sudo pacman -S mpv libreoffice-fresh neovim kitty"
+echo "  sudo xbps-install -S mpv libreoffice neovim kitty"
 echo ""
-echo "mirage is AUR-only on Arch:"
-echo "  yay -S mirage    # or: paru -S mirage"
+echo "mirage specifically: check availability first, package naming for"
+echo "image-viewer 'mirage' vs the unrelated matrix client of the same"
+echo "name can vary by repo — confirm with:"
+echo "  xbps-query -Rs mirage"
 echo ""
-echo "Optional — Nerd Font + emoji fonts for the nerdfont icon set:"
-echo "  sudo pacman -S noto-fonts-emoji ttf-firacode-nerd"
-echo "  Set your terminal font to 'FiraCode Nerd Font' afterward."
+echo "Optional — install a Nerd Font for the nerdfont icon set:"
+echo "  mkdir -p ~/.local/share/fonts"
+echo "  curl -fLo ~/.local/share/fonts/FiraCodeNerdFont-Regular.ttf \\"
+echo "    https://github.com/ryanoasis/nerd-fonts/raw/HEAD/patched-fonts/FiraCode/Regular/FiraCodeNerdFont-Regular.ttf"
+echo "  fc-cache -fv"
