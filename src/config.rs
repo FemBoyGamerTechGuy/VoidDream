@@ -620,13 +620,42 @@ pub struct Config {
 
 fn default_true() -> bool { true }
 
-/// Check if a pressed key matches any binding in a slash-separated list.
+/// Split a stored multi-binding string into its individual binding tokens.
 /// Format: "Up/k/Ctrl+C"  — slash separates independent bindings, + joins combo keys.
-pub fn key_matches(stored: &str, key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> bool {
+///
+/// The literal "/" key is a special case: it's both a valid binding (the
+/// default for fuzzy search) and the delimiter used to join multi-bindings.
+/// A stored value of exactly "/" is a single literal "/" binding rather than
+/// two empty tokens either side of the delimiter. More generally, any run of
+/// consecutive delimiters that would otherwise produce empty tokens is
+/// collapsed into one literal "/" binding — this is how the keybind editor's
+/// "add binding" screen actually joins a new key onto an existing "/"
+/// binding (`format!("{}/{}", "/", "k")` produces "//k").
+///
+/// Used by both `key_matches` (to check a keypress) and the settings UI (to
+/// list/remove individual bindings) so the two stay in sync.
+pub fn split_bindings(stored: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut prev_empty = false;
     for binding in stored.split('/') {
         let binding = binding.trim();
-        if binding.is_empty() { continue; }
-        if binding_matches(binding, key, mods) { return true; }
+        if binding.is_empty() {
+            if prev_empty { continue; }
+            out.push("/".to_string());
+            prev_empty = true;
+            continue;
+        }
+        prev_empty = false;
+        out.push(binding.to_string());
+    }
+    out
+}
+
+/// Check if a pressed key matches any binding in a slash-separated list.
+/// See `split_bindings` for how the literal "/" key is handled.
+pub fn key_matches(stored: &str, key: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> bool {
+    for binding in split_bindings(stored) {
+        if binding_matches(&binding, key, mods) { return true; }
     }
     false
 }
@@ -994,7 +1023,7 @@ impl SettingsState {
             "fixed_pgupdown"   => "Page Up / Page Down  (fixed)".into(),
             "fixed_homeend"    => "Home / End  (fixed)".into(),
             "fixed_about_app"     => "VoidDream".into(),
-            "fixed_about_ver"     => "0.1.8-1".into(),
+            "fixed_about_ver"     => env!("CARGO_PKG_VERSION").into(),
             "fixed_about_author"  => "FemBoyGamerTechGuy".into(),
             "fixed_about_license" => "VoidDream Proprietary License v1.0".into(),
             "fixed_about_repo"    => "github.com/FemBoyGamerTechGuy/VoidDream".into(),

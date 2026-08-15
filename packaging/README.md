@@ -7,6 +7,7 @@
 | Arch/Artix | `PKGBUILD` + `makepkg` | Arch, Artix, Manjaro, EndeavourOS, and derivatives |
 | `.deb` | `cargo-deb` | Debian, Ubuntu, Linux Mint, Pop!_OS, and derivatives |
 | `.rpm` | `cargo-generate-rpm` | Fedora, RHEL, CentOS Stream, AlmaLinux, Rocky, openSUSE |
+| `.xbps` | `xbps-src` template | Void Linux |
 
 ---
 
@@ -64,6 +65,11 @@ sudo dnf install ./target/generate-rpm/VoidDream-*.rpm
 > The script also writes `/etc/profile.d/cargo.sh` so `~/.cargo/bin` is in PATH
 > for all users immediately — no reboot or re-login needed.
 
+### Void Linux
+
+See **[void/README.md](void/README.md)** — xbps-src templates need to live
+inside a `void-packages` checkout, so the build steps live in their own doc.
+
 ---
 
 ## What gets installed
@@ -89,6 +95,9 @@ sudo apt remove voiddream
 
 # Fedora / RHEL
 sudo dnf remove VoidDream
+
+# Void Linux
+sudo xbps-remove voiddream
 ```
 
 ---

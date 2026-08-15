@@ -6,11 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.1.8-1] - 2026-04-29
+## [0.1.8-1] - 2026-08-14
 
 ### Fixed
 - Copying, deleting, or trashing files with non-UTF-8 characters in their names no longer errors out; filenames are now handled with lossy UTF-8 conversion so special characters display correctly in the progress overlay.
 - Deleting directories that contain symlinks to other directories (e.g. `.wine` / Wine prefix folders) no longer freezes the app; symlinks are now removed directly instead of being followed recursively.
+- **Fuzzy search (`/`) never opened** — the default binding for search was the literal `/` key, but `key_matches` splits stored bindings on `/` to support multi-key combos like `Left/Backspace`. Splitting `"/"` on `/` produced two empty tokens instead of the key itself, so the binding could never match and pressing `/` did nothing. Binding parsing is now consolidated into a single `split_bindings` helper that treats a stored `/` as a literal key rather than a delimiter with nothing on either side.
+- **Keybind editor couldn't display or remove the search binding** — the "current bindings" label, the remove-a-binding list, and the Settings keybinds list all used the same broken `/`-splitting logic as the matcher above, so the `/` binding showed up blank or as "no bindings to remove". All three now use the same `split_bindings` helper as the matcher.
+- **In-app version display could drift from the actual build** — the Settings/About screen and the standalone About overlay each had the version number hardcoded as a separate string literal, and had already fallen out of sync with each other (`0.1.8-1` vs `0.1.8`). Both now read `CARGO_PKG_VERSION` at compile time from `Cargo.toml` instead.
+
+### Added
+- **XBPS packaging (Void Linux)** — `packaging/void/template` (an xbps-src package template) alongside the existing Arch, Debian and Fedora packaging. See `packaging/void/README.md`.
 
 ---
 

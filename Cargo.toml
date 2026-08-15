@@ -49,6 +49,14 @@ assets = [
 
 # ── .rpm package (cargo-generate-rpm) ─────────────────────────────────────────
 [package.metadata.generate-rpm]
+# RPM's Version field rejects '-' (it's reserved as the Version/Release
+# separator in RPM's own naming scheme), so it can't just reuse
+# package.version = "0.1.8-1" the way the .deb/xbps builds do. Split
+# explicitly instead: RPM Version "0.1.8", Release "1" — same information,
+# valid syntax. Keep these two in sync with package.version by hand when
+# bumping versions.
+version = "0.1.8"
+release = "1"
 assets = [
     { source = "target/release/VoidDream",  dest = "/usr/bin/VoidDream",              mode = "755" },
     { source = "themes/*.json",             dest = "/usr/share/VoidDream/themes/",    mode = "644" },

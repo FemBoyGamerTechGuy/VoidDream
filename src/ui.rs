@@ -682,7 +682,7 @@ fn draw_keybind_menu(f: &mut Frame, app: &App, rect: Rect) {
     let cur_display = if current.is_empty() {
         "(none)".into()
     } else {
-        current.split('/').map(|s| s.trim()).collect::<Vec<_>>().join("  /  ")
+        crate::config::split_bindings(&current).join("  /  ")
     };
     let ow = 58u16.min(rect.width);
     let oh = (options.len() as u16 + 7).min(rect.height);
@@ -778,8 +778,7 @@ fn draw_key_capture(f: &mut Frame, app: &App, rect: Rect) {
 fn draw_keybind_remove(f: &mut Frame, app: &App, rect: Rect) {
     let l = app.lang;
     let current = crate::config::SettingsState::get_value(&app.keybind_key, &app.cfg);
-    let bindings: Vec<&str> = current.split('/')
-        .map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let bindings: Vec<String> = crate::config::split_bindings(&current);
     let ow = 50u16.min(rect.width);
     let oh = (bindings.len() as u16 + 6).max(8).min(rect.height);
     let popup = Rect {
@@ -1541,7 +1540,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             Line::from(vec![]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_ver),     st(muted)),
-                Span::styled("0.1.8", bold(fg)),
+                Span::styled(env!("CARGO_PKG_VERSION"), bold(fg)),
             ]),
             Line::from(vec![
                 Span::styled(format!("  {:20}", l.about_author),  st(muted)),
@@ -1634,7 +1633,7 @@ fn draw_settings(f: &mut Frame, app: &App, rect: Rect) {
             format!("{}{}", app.settings.edit_buf, app.icons.chrome.cursor_block)
         } else if key.starts_with("key_") && app.settings.section == SettingsSection::Keybinds && !val.is_empty() {
             // Show keybind values with pretty / separator between independent bindings
-            val.split('/').map(|s| s.trim()).collect::<Vec<_>>().join(" / ")
+            crate::config::split_bindings(&val).join(" / ")
         } else { val };
 
         if is_header {

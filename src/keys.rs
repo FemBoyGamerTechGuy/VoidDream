@@ -700,7 +700,7 @@ fn handle_keybind_menu(app: &mut App, key: KeyCode) {
                 2 => { // Remove — show list of current bindings to pick from
                     let k = app.keybind_key.clone();
                     let current = crate::config::SettingsState::get_value(&k, &app.cfg);
-                    let bindings: Vec<String> = current.split('/').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    let bindings: Vec<String> = crate::config::split_bindings(&current);
                     if bindings.is_empty() {
                         app.msg("No bindings to remove", true);
                     } else {
@@ -769,7 +769,7 @@ fn handle_key_capture(app: &mut App, key: KeyCode, mods: crossterm::event::KeyMo
 pub fn handle_keybind_remove(app: &mut App, key: KeyCode) {
     let k = app.keybind_key.clone();
     let current = crate::config::SettingsState::get_value(&k, &app.cfg);
-    let bindings: Vec<String> = current.split('/').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let bindings: Vec<String> = crate::config::split_bindings(&current);
 
     match key {
         KeyCode::Esc => { app.mode = InputMode::KeybindMenu; }

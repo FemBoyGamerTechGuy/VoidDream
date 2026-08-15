@@ -1,0 +1,50 @@
+# Template file for 'voiddream'
+pkgname=voiddream
+version=0.1.8.1
+revision=1
+build_style=cargo
+build_helper=rust
+hostmakedepends="pkg-config"
+makedepends="libzstd-devel chafa-devel libglib-devel"
+# No explicit `depends=` for these — xbps-src auto-detects runtime shared
+# library dependencies (libzstd, libchafa, libglib) from the compiled
+# binary's ELF NEEDED entries. Void's Manual is explicit that libraries
+# linked by ELF objects must not be listed in `depends` by hand.
+short_desc="Dreamy void-themed TUI file manager built with Rust and Ratatui"
+maintainer="FemBoyGamerTechGuy <https://github.com/FemBoyGamerTechGuy>"
+# Source-available, not OSI/FSF-approved — not distributable freely like the
+# rest of the repo (redistribution requires the author's written permission).
+license="LicenseRef-VoidDream-1.0"
+restricted=yes
+homepage="https://github.com/FemBoyGamerTechGuy/VoidDream"
+distfiles="https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-1.tar.gz"
+# Placeholder — this is being retagged onto the existing v0.1.8-1 release
+# (not a new tag), so the checksum WILL change once the tag is overwritten.
+# Recompute against the real tarball before building for real:
+#   curl -LO https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-1.tar.gz
+#   sha256sum v0.1.8-1.tar.gz
+checksum=SKIP
+
+# Link against the system zstd shared library instead of the bundled static
+# copy, which fails to build inside the xbps-src sandbox. Mirrors
+# ZSTD_SYS_USE_PKG_CONFIG=1 in packaging/PKGBUILD (the Arch template).
+export ZSTD_SYS_USE_PKG_CONFIG=1
+
+post_install() {
+	vlicense LICENSE
+
+	vmkdir usr/share/VoidDream/themes
+	vcopy "themes/*.json" usr/share/VoidDream/themes
+
+	vmkdir usr/share/VoidDream/icons
+	vcopy "icons/*.json" usr/share/VoidDream/icons
+
+	if [ -f assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop ]; then
+		vinstall assets/desktop/io.github.FemBoyGamerTechGuy.VoidDream.desktop \
+			644 usr/share/applications
+	fi
+	if [ -f assets/io.github.FemBoyGamerTechGuy.VoidDream.metainfo.xml ]; then
+		vinstall assets/io.github.FemBoyGamerTechGuy.VoidDream.metainfo.xml \
+			644 usr/share/metainfo
+	fi
+}
