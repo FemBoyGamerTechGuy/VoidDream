@@ -18,12 +18,7 @@ license="LicenseRef-VoidDream-1.0"
 restricted=yes
 homepage="https://github.com/FemBoyGamerTechGuy/VoidDream"
 distfiles="https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-1.tar.gz"
-# Placeholder — this is being retagged onto the existing v0.1.8-1 release
-# (not a new tag), so the checksum WILL change once the tag is overwritten.
-# Recompute against the real tarball before building for real:
-#   curl -LO https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-1.tar.gz
-#   sha256sum v0.1.8-1.tar.gz
-checksum=SKIP
+checksum=f0d5f4200eda193589acb01557b97fe645b88a6c4e3c83c5d6c561dc3eee2d91
 
 # Link against the system zstd shared library instead of the bundled static
 # copy, which fails to build inside the xbps-src sandbox. Mirrors

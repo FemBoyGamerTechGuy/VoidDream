@@ -24,12 +24,12 @@ sudo xbps-install --repository=hostdir/binpkgs voiddream
 
 ## Before building
 
-`checksum` in the template is set to `SKIP` as a placeholder. Fill it in with
-the real hash of the release tarball before building for real:
+`checksum` in the template is set to the real hash of the release tarball
+(v0.1.8-1). If you're updating to a new version, recompute it:
 
 ```bash
-curl -LO https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-2.tar.gz
-sha256sum v0.1.8-2.tar.gz
+curl -LO https://github.com/FemBoyGamerTechGuy/VoidDream/archive/refs/tags/v0.1.8-1.tar.gz
+sha256sum v0.1.8-1.tar.gz
 ```
 
 Paste that hash into `checksum=` in the template. `xbps-src` will refuse to
