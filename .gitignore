@@ -3,7 +3,7 @@
 dist/
 
 # Cargo lock (keep for binaries, ignore for libraries)
-# Cargo.lock is intentionally kept for this binary crate
+Cargo.lock
 
 # Editor / IDE
 .vscode/
